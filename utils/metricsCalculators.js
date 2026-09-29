@@ -402,6 +402,16 @@ function updateRequestorMetrics(
 /**
  * Calculate node timeout metrics
  */
+// What counts against a node's rating (the pool's slow switch, getLogs plan D13, reads it as
+// percentTimeout): a timeout, or the node's own -70000 "Internal node error" (buidlguidl-client's
+// answer when its execution client didn't respond: a broken node that fails instantly and would
+// otherwise never look slow; plan M15). timeout_error_heavy (getLogs) stays out: slow heavy
+// queries are expected. A node's answer to a bad request (revert, invalid params) is not a failure.
+function isNodeFailureStatus(status) {
+    if (status === 'timeout_error') return true;
+    return typeof status === 'string' && /"code"\s*:\s*-70000\b/.test(status);
+}
+
 function calculateNodeTimeoutMetrics(poolNodesTimeoutCache, timeframe = 'week') {
     const daysToLookBack = timeframe === 'day' ? 1 : 7;
     const timeAgo = Date.now() - (daysToLookBack * 24 * 60 * 60 * 1000);
@@ -427,7 +437,7 @@ function calculateNodeTimeoutMetrics(poolNodesTimeoutCache, timeframe = 'week') 
 
             const stats = nodeStats.get(fullNodeId);
             stats.totalRequests++;
-            if (status === 'timeout_error') {
+            if (isNodeFailureStatus(status)) {
                 stats.timeoutRequests++;
             }
         }
@@ -460,6 +470,7 @@ module.exports = {
     updateRequestHistory,
     getDashboardMetrics,
     updateRequestorMetrics,
-    calculateNodeTimeoutMetrics
+    calculateNodeTimeoutMetrics,
+    isNodeFailureStatus
 };
 
