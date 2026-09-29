@@ -1,0 +1,1 @@
+2026-09-29 18:04:21|1790705061989|https://fixture.buidlguidl.test|eth_getBalance|0x00000000000000000000000000000000000f1a7e,0x1312d33|33.590|{"jsonrpc":"2.0","id":1,"error":{"code":-70000,"message":"Internal Proxy service error","data":"getaddrinfo ENOTFOUND eth-mainnet.alchemyapi.io"}}

@@ -1,3 +1,4 @@
+const { parseRequestLogLine } = require('./requestLogLine');
 const fs = require('fs');
 const readline = require('readline');
 const { countLines, getByteOffsetForLine } = require('./fileUtils');
@@ -66,22 +67,26 @@ async function parseLogFile(logPath, targetMap, logType, lastProcessedIndexes, l
                 lineBuffer = lines.pop() || '';
                 
                 for (const line of lines) {
-                    if (line.trim()) {
-                        const [timestamp, epoch, requester, method, params, elapsed, status] = line.split('|');
-                        const key = `${epoch}-${currentLine}`;
+                    // v2 or legacy format (utils/requestLogLine.js); unreadable lines are skipped
+                    const entry = parseRequestLogLine(line);
+                    if (entry) {
+                        const key = `${entry.epoch}-${currentLine}`;
                         targetMap.set(key, {
-                            timestamp,
-                            epoch,
-                            requester: requester || '',
-                            method,
-                            params,
-                            elapsed: parseFloat(elapsed),
-                            status,
+                            timestamp: entry.timestamp,
+                            epoch: entry.epoch,
+                            requester: entry.requester || '',
+                            ip: entry.ip,
+                            method: entry.method,
+                            params: entry.params,
+                            elapsed: entry.elapsed,
+                            status: entry.status,
                             lineIndex: currentLine
                         });
                         newEntriesCount++;
-                        lastProcessedIndexes[logType] = currentLine;
                     }
+                    // Resume point is the last line read, parsed or skipped, so line numbers
+                    // (entry keys) stay right after an unreadable line
+                    lastProcessedIndexes[logType] = currentLine;
                     currentLine++;
                     currentByte += Buffer.byteLength(line + '\n', 'utf8');
                 }
@@ -91,19 +96,22 @@ async function parseLogFile(logPath, targetMap, logType, lastProcessedIndexes, l
                 // Process last line if exists
                 if (lineBuffer.trim()) {
                     const line = lineBuffer;
-                    const [timestamp, epoch, requester, method, params, elapsed, status] = line.split('|');
-                    const key = `${epoch}-${currentLine}`;
-                    targetMap.set(key, {
-                        timestamp,
-                        epoch,
-                        requester: requester || '',
-                        method,
-                        params,
-                        elapsed: parseFloat(elapsed),
-                        status,
-                        lineIndex: currentLine
-                    });
-                    newEntriesCount++;
+                    const entry = parseRequestLogLine(line);
+                    if (entry) {
+                        const key = `${entry.epoch}-${currentLine}`;
+                        targetMap.set(key, {
+                            timestamp: entry.timestamp,
+                            epoch: entry.epoch,
+                            requester: entry.requester || '',
+                            ip: entry.ip,
+                            method: entry.method,
+                            params: entry.params,
+                            elapsed: entry.elapsed,
+                            status: entry.status,
+                            lineIndex: currentLine
+                        });
+                        newEntriesCount++;
+                    }
                     lastProcessedIndexes[logType] = currentLine;
                     currentByte += Buffer.byteLength(line + '\n', 'utf8');
                 }

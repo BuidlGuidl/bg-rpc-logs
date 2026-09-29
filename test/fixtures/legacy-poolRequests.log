@@ -1,0 +1,14 @@
+2026-09-29 18:04:01|1790705041684|https://fixture.buidlguidl.test|eth_getBalance|0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48,0x1312d00|77.567|success
+2026-09-29 18:04:02|1790705042172|https://fixture.buidlguidl.test|eth_call|{"to":"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48","data":"0xa9059cbb"},0x18e05b9|54.969|{"jsonrpc":"2.0","error":{"code":3,"message":"execution reverted"},"id":1}
+2026-09-29 18:04:02|1790705042636|https://fixture.buidlguidl.test|eth_getLogs|{"address":"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48","fromBlock":"0x18e05b4","toBlock":"0x18e05b6"}|115.987|success
+2026-09-29 18:04:03|1790705043995|https://fixture.buidlguidl.test|eth_getBlockByNumber|0x18e05af,false|63.061|success
+2026-09-29 18:04:04|1790705044059|https://fixture.buidlguidl.test|eth_gasPrice||58.084|success
+2026-09-29 18:04:04|1790705044526||eth_getBalance|0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48,0x18e05ba|54.693|success
+2026-09-29 18:04:04|1790705044985|some.dapp.example|eth_getCode|0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48,0x18e05ba|53.601|success
+2026-09-29 18:04:05|1790705045443|https://evil|origin.example|eth_getTransactionCount|0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48,0x18e05ba|53.374|success
+2026-09-29 18:04:05|1790705045901|https://fixture.buidlguidl.test|eth_getBalance|0xabc|def,0x18e05ba|68.700|{"jsonrpc":"2.0","error":{"code":-32602,"message":"Invalid params","data":"odd number of digits at line 1 column 11"},"id":1}
+2026-09-29 18:04:06|1790705046374|https://fixture.buidlguidl.test|eth_getBalance|0xabc
+def,0x18e05ba|95.110|{"jsonrpc":"2.0","error":{"code":-32602,"message":"Invalid params","data":"odd number of digits at line 1 column 12"},"id":1}
+2026-09-29 18:04:06|1790705046876|https://fixture.buidlguidl.test|eth_get|Balance|0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48,0x18e05ba|145.930|{"jsonrpc":"2.0","error":{"code":-32601,"message":"the method eth_get|Balance does not exist/is not available"},"id":1}
+2026-09-29 18:04:07|1790705047428|https://fixture.buidlguidl.test|eth_call|{"to":"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48","data":"0x18160ddd","note":"a|b"},0x18e05ba|65.387|success
+2026-09-29 18:04:21|1790705061989|https://fixture.buidlguidl.test|eth_getBalance|0x00000000000000000000000000000000000f1a7e,0x1312d33|4.763|{"jsonrpc":"2.0","id":1,"error":{"code":-70000,"message":"Internal Proxy service error","data":"connect ECONNREFUSED 127.0.0.1:3003"}}
