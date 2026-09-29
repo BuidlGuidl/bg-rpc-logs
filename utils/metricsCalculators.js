@@ -2,6 +2,7 @@ const { calculatePercentiles } = require('./mathUtils');
 const { getStartOfHour } = require('./timeUtils');
 const { extractNodePrefix } = require('./dataTransformers');
 const { ignoredErrorCodes } = require('../../shared/ignoredErrorCodes');
+const { classifyStatus } = require('./errorClass');
 
 /**
  * Update request history with hourly aggregated data
@@ -58,20 +59,12 @@ function updateRequestHistory(
             if (entry.status === 'success') {
                 hourData[`n${prefix.charAt(0).toUpperCase() + prefix.slice(1)}RequestsSuccess`]++;
             } else {
-                try {
-                    const statusObj = JSON.parse(entry.status);
-                    const code = statusObj.error && statusObj.error.code;
-                    if (code !== undefined && ignoredErrorCodes.includes(Number(code))) {
-                        // Skip ignored error codes
-                        return;
-                    }
-                    if (code && code.toString().startsWith('-69')) {
-                        hourData[`n${prefix.charAt(0).toUpperCase() + prefix.slice(1)}RequestsWarning`]++;
-                    } else {
-                        hourData[`n${prefix.charAt(0).toUpperCase() + prefix.slice(1)}RequestsError`]++;
-                    }
-                } catch (e) {
-                    // If status is not JSON or doesn't have expected structure, count as error
+                // Only our failures count as errors; a caller's mistake doesn't (utils/errorClass.js)
+                const errorClass = classifyStatus(entry.status);
+                if (errorClass === 'caller' || errorClass === 'ok') return;
+                if (errorClass === 'warning') {
+                    hourData[`n${prefix.charAt(0).toUpperCase() + prefix.slice(1)}RequestsWarning`]++;
+                } else {
                     hourData[`n${prefix.charAt(0).toUpperCase() + prefix.slice(1)}RequestsError`]++;
                 }
             }
@@ -154,20 +147,12 @@ function getDashboardMetrics(
             fallbackRequestTimesLastHour.push(entry.elapsed);
             // Check if status is not success and error code doesn't start with -69
             if (entry.status !== 'success') {
-                try {
-                    const statusObj = JSON.parse(entry.status);
-                    const code = statusObj.error && statusObj.error.code;
-                    if (code !== undefined && ignoredErrorCodes.includes(Number(code))) {
-                        // Skip ignored error codes
-                        return;
-                    }
-                    if (code && code.toString().startsWith('-69')) {
-                        nWarningFallbackRequestsLastHour++;
-                    } else {
-                        nErrorFallbackRequestsLastHour++;
-                    }
-                } catch (e) {
-                    // If status is not JSON or doesn't have expected structure, count as error
+                // Only our failures count as errors; a caller's mistake doesn't (utils/errorClass.js)
+                const errorClass = classifyStatus(entry.status);
+                if (errorClass === 'caller' || errorClass === 'ok') return;
+                if (errorClass === 'warning') {
+                    nWarningFallbackRequestsLastHour++;
+                } else {
                     nErrorFallbackRequestsLastHour++;
                 }
             }
@@ -187,20 +172,12 @@ function getDashboardMetrics(
                 nCacheRequestsClientLastHour++;
                 cacheRequestClientTimesLastHour.push(entry.elapsed);
                 if (entry.status !== 'success') {
-                    try {
-                        const statusObj = JSON.parse(entry.status);
-                        const code = statusObj.error && statusObj.error.code;
-                        if (code !== undefined && ignoredErrorCodes.includes(Number(code))) {
-                            // Skip ignored error codes
-                            return;
-                        }
-                        if (code && code.toString().startsWith('-69')) {
-                            nWarningCacheRequestsClientLastHour++;
-                        } else {
-                            nErrorCacheRequestsClientLastHour++;
-                        }
-                    } catch (e) {
-                        // If status is not JSON or doesn't have expected structure, count as error
+                    // Only our failures count as errors; a caller's mistake doesn't (utils/errorClass.js)
+                    const errorClass = classifyStatus(entry.status);
+                    if (errorClass === 'caller' || errorClass === 'ok') return;
+                    if (errorClass === 'warning') {
+                        nWarningCacheRequestsClientLastHour++;
+                    } else {
                         nErrorCacheRequestsClientLastHour++;
                     }
                 }
@@ -209,20 +186,12 @@ function getDashboardMetrics(
                 cacheRequestTimesLastHour.push(entry.elapsed);
                 totalCacheTime += entry.elapsed;
                 if (entry.status !== 'success') {
-                    try {
-                        const statusObj = JSON.parse(entry.status);
-                        const code = statusObj.error && statusObj.error.code;
-                        if (code !== undefined && ignoredErrorCodes.includes(Number(code))) {
-                            // Skip ignored error codes
-                            return;
-                        }
-                        if (code && code.toString().startsWith('-69')) {
-                            nWarningCacheRequestsLastHour++;
-                        } else {
-                            nErrorCacheRequestsLastHour++;
-                        }
-                    } catch (e) {
-                        // If status is not JSON or doesn't have expected structure, count as error
+                    // Only our failures count as errors; a caller's mistake doesn't (utils/errorClass.js)
+                    const errorClass = classifyStatus(entry.status);
+                    if (errorClass === 'caller' || errorClass === 'ok') return;
+                    if (errorClass === 'warning') {
+                        nWarningCacheRequestsLastHour++;
+                    } else {
                         nErrorCacheRequestsLastHour++;
                     }
                 }
@@ -241,20 +210,12 @@ function getDashboardMetrics(
             totalPoolTime += entry.elapsed;
             poolRequestTimesLastHour.push(entry.elapsed);
             if (entry.status !== 'success') {
-                try {
-                    const statusObj = JSON.parse(entry.status);
-                    const code = statusObj.error && statusObj.error.code;
-                    if (code !== undefined && ignoredErrorCodes.includes(Number(code))) {
-                        // Skip ignored error codes
-                        return;
-                    }
-                    if (code && code.toString().startsWith('-69')) {
-                        nWarningPoolRequestsLastHour++;
-                    } else {
-                        nErrorPoolRequestsLastHour++;
-                    }
-                } catch (e) {
-                    // If status is not JSON or doesn't have expected structure, count as error
+                // Only our failures count as errors; a caller's mistake doesn't (utils/errorClass.js)
+                const errorClass = classifyStatus(entry.status);
+                if (errorClass === 'caller' || errorClass === 'ok') return;
+                if (errorClass === 'warning') {
+                    nWarningPoolRequestsLastHour++;
+                } else {
                     nErrorPoolRequestsLastHour++;
                 }
             }
