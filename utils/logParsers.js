@@ -1,11 +1,11 @@
 const { parseRequestLogLine } = require('./requestLogLine');
 const fs = require('fs');
-const readline = require('readline');
-const { countLines, getByteOffsetForLine } = require('./fileUtils');
+const { findTailStart, readLines } = require('./fileUtils');
+const { recordNodeTimeoutSample, pruneNodeTimeoutCounts } = require('./metricsCalculators');
 const { maxTimingEntriesPerNode, maxParamsChars } = require('../config');
 
 // A copy of a string that was cut from a larger one. split() returns slices that keep the whole
-// chunk they were cut from alive, so every entry we hold would pin ~64 KB of log text.
+// line they were cut from alive, so an entry would pin its full line (multicall params: 8+ KB).
 function ownCopy(s) {
     return typeof s === 'string' ? Buffer.from(s, 'utf8').toString('utf8') : s;
 }
@@ -19,400 +19,247 @@ function storedParams(params) {
 }
 
 /**
+ * Delete the oldest entries until the map holds maxEntries. Entries are inserted in file order and
+ * a Map iterates in insertion order, so the oldest are the first keys: no sort needed.
+ */
+function pruneOldest(targetMap, maxEntries) {
+    const keys = targetMap.keys();
+    while (targetMap.size > maxEntries) {
+        targetMap.delete(keys.next().value);
+    }
+}
+
+/**
  * Parse a standard log file incrementally
  * Efficiently reads only new entries from log files
+ * @returns {Promise<boolean>} - true if targetMap changed
  */
 async function parseLogFile(logPath, targetMap, logType, lastProcessedIndexes, lastByteOffsets, maxLogEntries) {
     try {
-        let newEntriesCount = 0;
-        const lastProcessedIndex = lastProcessedIndexes[logType];
-        
-        // On first run, count total lines and only read the last maxLogEntries
-        let startLine = 0;
-        let startByte = 0;
-        
-        if (lastProcessedIndex === -1) {
-            // First run - need to find where to start
-            const totalLines = await countLines(logPath);
-            if (totalLines > maxLogEntries) {
-                startLine = totalLines - maxLogEntries;
-                console.log(`${logType}: Skipping first ${startLine} lines, reading last ${maxLogEntries} entries from ${totalLines} total lines`);
-                // Calculate byte offset to start from
-                startByte = await getByteOffsetForLine(logPath, startLine);
+        let startLine = lastProcessedIndexes[logType] + 1;
+        let startByte = lastByteOffsets[logType];
+        let reset = false;
+
+        if (lastProcessedIndexes[logType] === -1) {
+            // First run: only read the last maxLogEntries lines
+            const tail = await findTailStart(logPath, maxLogEntries);
+            startLine = tail.startLine;
+            startByte = tail.startByte;
+            if (startLine > 0) {
+                console.log(`${logType}: Skipping first ${startLine} lines, reading last ${maxLogEntries} entries from ${tail.totalLines} total lines`);
             }
-        } else {
-            // Subsequent runs - start from where we left off
-            startLine = lastProcessedIndex + 1;
-            startByte = lastByteOffsets[logType];
         }
-        
-        // Check if file exists and get its size
+
         const stats = await fs.promises.stat(logPath);
-        if (stats.size === startByte) {
-            // No new data
-            return;
-        }
-        
+
         // If file was truncated or is smaller than our offset, reset
         if (stats.size < startByte) {
             console.log(`${logType}: Log file was rotated or truncated, re-reading from start`);
             targetMap.clear();
             lastProcessedIndexes[logType] = -1;
             lastByteOffsets[logType] = 0;
+            reset = true;
             startLine = 0;
             startByte = 0;
         }
-        
-        // Initialize currentLine to startLine since we're reading from that position
-        let currentLine = startLine;
-        let currentByte = startByte;
-        let lineBuffer = '';
-        
-        await new Promise((resolve, reject) => {
-            const stream = fs.createReadStream(logPath, {
-                start: startByte,
-                encoding: 'utf8'
-            });
-            
-            stream.on('data', (chunk) => {
-                lineBuffer += chunk;
-                const lines = lineBuffer.split('\n');
-                // Keep the last incomplete line in buffer
-                lineBuffer = lines.pop() || '';
-                
-                for (const line of lines) {
-                    // v2 or legacy format (utils/requestLogLine.js); unreadable lines are skipped
-                    const entry = parseRequestLogLine(line);
-                    if (entry) {
-                        const key = ownCopy(`${entry.epoch}-${currentLine}`);
-                        targetMap.set(key, {
-                            timestamp: ownCopy(entry.timestamp),
-                            epoch: ownCopy(entry.epoch),
-                            requester: ownCopy(entry.requester || ''),
-                            ip: ownCopy(entry.ip),
-                            method: ownCopy(entry.method),
-                            params: storedParams(entry.params),
-                            elapsed: entry.elapsed,
-                            status: ownCopy(entry.status),
-                            lineIndex: currentLine
-                        });
-                        newEntriesCount++;
-                    }
-                    // Resume point is the last line read, parsed or skipped, so line numbers
-                    // (entry keys) stay right after an unreadable line
-                    lastProcessedIndexes[logType] = currentLine;
-                    currentLine++;
-                    currentByte += Buffer.byteLength(line + '\n', 'utf8');
-                }
-            });
-            
-            stream.on('end', () => {
-                // Process last line if exists
-                if (lineBuffer.trim()) {
-                    const line = lineBuffer;
-                    const entry = parseRequestLogLine(line);
-                    if (entry) {
-                        const key = ownCopy(`${entry.epoch}-${currentLine}`);
-                        targetMap.set(key, {
-                            timestamp: ownCopy(entry.timestamp),
-                            epoch: ownCopy(entry.epoch),
-                            requester: ownCopy(entry.requester || ''),
-                            ip: ownCopy(entry.ip),
-                            method: ownCopy(entry.method),
-                            params: storedParams(entry.params),
-                            elapsed: entry.elapsed,
-                            status: ownCopy(entry.status),
-                            lineIndex: currentLine
-                        });
-                        newEntriesCount++;
-                    }
-                    lastProcessedIndexes[logType] = currentLine;
-                    currentByte += Buffer.byteLength(line + '\n', 'utf8');
-                }
-                lastByteOffsets[logType] = currentByte;
-                resolve();
-            });
-            
-            stream.on('error', reject);
-        });
-        
-        // Prune oldest entries if needed
-        if (targetMap.size > maxLogEntries) {
-            const entriesToRemove = Array.from(targetMap.entries())
-                .sort((a, b) => a[1].lineIndex - b[1].lineIndex)
-                .slice(0, targetMap.size - maxLogEntries);
-            entriesToRemove.forEach(([key]) => targetMap.delete(key));
+
+        if (stats.size === startByte) {
+            // No new data
+            return reset;
         }
-        
+
+        let newEntriesCount = 0;
+        let currentLine = startLine;
+        lastByteOffsets[logType] = await readLines(logPath, startByte, (line) => {
+            // v2 or legacy format (utils/requestLogLine.js); unreadable lines are skipped
+            const entry = parseRequestLogLine(line);
+            if (entry) {
+                const key = ownCopy(`${entry.epoch}-${currentLine}`);
+                targetMap.set(key, {
+                    timestamp: ownCopy(entry.timestamp),
+                    epoch: ownCopy(entry.epoch),
+                    requester: ownCopy(entry.requester || ''),
+                    ip: ownCopy(entry.ip),
+                    method: ownCopy(entry.method),
+                    params: storedParams(entry.params),
+                    elapsed: entry.elapsed,
+                    status: ownCopy(entry.status),
+                    lineIndex: currentLine
+                });
+                newEntriesCount++;
+            }
+            // Resume point is the last line read, parsed or skipped, so line numbers
+            // (entry keys) stay right after an unreadable line
+            lastProcessedIndexes[logType] = currentLine;
+            currentLine++;
+        });
+
+        pruneOldest(targetMap, maxLogEntries);
+
         if (newEntriesCount > 0) {
             const mapName = logType + 'RequestsMap';
             console.log(`Added ${newEntriesCount} new entries to ${mapName}. Total entries: ${targetMap.size}`);
         }
+        return reset || newEntriesCount > 0;
     } catch (error) {
         const mapName = logType + 'RequestsMap';
         console.error(`Error parsing ${mapName} log file:`, error);
+        return false;
     }
 }
 
 /**
- * Parse pool node log file incrementally
+ * Parse poolNodes.log incrementally, in one pass for everything read from it:
+ * - poolNodesMap: the last maxLogEntries lines
+ * - poolNodesTimingMap: durations per node, the last maxTimingEntriesPerNode of each
+ * - nodeTimeoutCounts: requests and failures per node per hour, last 7 days (metricsCalculators)
+ * The first call reads the whole file (timing and timeout counts need it); later calls read only
+ * what was appended.
+ * @returns {Promise<boolean>} - true if anything changed
  */
-async function parsePoolNodeLog(logPath, targetMap, lastProcessedIndexes, lastByteOffsets, maxLogEntries) {
+async function parsePoolNodesLog(logPath, poolNodesMap, poolNodesTimingMap, nodeTimeoutCounts, lastProcessedIndexes, lastByteOffsets, maxLogEntries) {
     try {
-        let newEntriesCount = 0;
-        const lastProcessedIndex = lastProcessedIndexes.poolNodes;
-        
-        // On first run, count total lines and only read the last maxLogEntries
-        let startLine = 0;
-        let startByte = 0;
-        
-        if (lastProcessedIndex === -1) {
-            // First run - need to find where to start
-            const totalLines = await countLines(logPath);
-            if (totalLines > maxLogEntries) {
-                startLine = totalLines - maxLogEntries;
-                console.log(`poolNodes: Skipping first ${startLine} lines, reading last ${maxLogEntries} entries from ${totalLines} total lines`);
-                // Calculate byte offset to start from
-                startByte = await getByteOffsetForLine(logPath, startLine);
-            }
-        } else {
-            // Subsequent runs - start from where we left off
-            startLine = lastProcessedIndex + 1;
-            startByte = lastByteOffsets.poolNodes;
-        }
-        
-        // Check if file exists and get its size
+        let startByte = lastByteOffsets.poolNodes;
+        let reset = false;
+
         const stats = await fs.promises.stat(logPath);
-        if (stats.size === startByte) {
-            // No new data
-            return;
-        }
-        
+
         // If file was truncated or is smaller than our offset, reset
         if (stats.size < startByte) {
-            console.log(`poolNodes: Log file was rotated or truncated, re-reading from start`);
-            targetMap.clear();
+            console.log('poolNodes: Log file was rotated or truncated, clearing node maps and re-reading from start');
+            poolNodesMap.clear();
+            poolNodesTimingMap.clear();
+            nodeTimeoutCounts.clear();
             lastProcessedIndexes.poolNodes = -1;
             lastByteOffsets.poolNodes = 0;
-            startLine = 0;
+            reset = true;
             startByte = 0;
         }
-        
-        // Initialize currentLine to startLine since we're reading from that position
-        let currentLine = startLine;
-        let currentByte = startByte;
-        let lineBuffer = '';
-        
-        await new Promise((resolve, reject) => {
-            const stream = fs.createReadStream(logPath, {
-                start: startByte,
-                encoding: 'utf8'
-            });
-            
-            stream.on('data', (chunk) => {
-                lineBuffer += chunk;
-                const lines = lineBuffer.split('\n');
-                // Keep the last incomplete line in buffer
-                lineBuffer = lines.pop() || '';
-                
-                for (const line of lines) {
-                    if (line.trim()) {
-                        const [timestamp, epoch, nodeId, owner, method, params, duration, status] = line.split('|');
-                        const key = ownCopy(`${epoch}-${nodeId}-${currentLine}`);
-                        targetMap.set(key, {
-                            timestamp: ownCopy(timestamp),
-                            epoch: ownCopy(epoch),
-                            nodeId: ownCopy(nodeId),
-                            owner: ownCopy(owner),
-                            method: ownCopy(method),
-                            params: storedParams(params),
-                            duration: parseFloat(duration),
-                            status: ownCopy(status),
-                            lineIndex: currentLine
-                        });
-                        newEntriesCount++;
-                        lastProcessedIndexes.poolNodes = currentLine;
-                    }
-                    currentLine++;
-                    currentByte += Buffer.byteLength(line + '\n', 'utf8');
-                }
-            });
-            
-            stream.on('end', () => {
-                // Process last line if exists
-                if (lineBuffer.trim()) {
-                    const line = lineBuffer;
-                    const [timestamp, epoch, nodeId, owner, method, params, duration, status] = line.split('|');
+
+        if (stats.size === startByte) {
+            // No new data
+            return reset;
+        }
+
+        // On a read from the start, lines before the last maxLogEntries only feed timing and counts
+        const firstMapLine = startByte === 0 ? (await findTailStart(logPath, maxLogEntries)).startLine : 0;
+
+        let newEntriesCount = 0;
+        let newTimingCount = 0;
+        let currentLine = lastProcessedIndexes.poolNodes + 1;
+        lastByteOffsets.poolNodes = await readLines(logPath, startByte, (line) => {
+            if (line.trim()) {
+                const parts = line.split('|');
+                const [timestamp, epochRaw, nodeIdRaw, ownerRaw, method, params, duration, status] = parts;
+                const epoch = ownCopy(epochRaw);
+                const nodeId = ownCopy(nodeIdRaw);
+                const owner = ownCopy(ownerRaw);
+                if (currentLine >= firstMapLine) {
                     const key = ownCopy(`${epoch}-${nodeId}-${currentLine}`);
-                    targetMap.set(key, {
+                    poolNodesMap.set(key, {
                         timestamp: ownCopy(timestamp),
-                        epoch: ownCopy(epoch),
-                        nodeId: ownCopy(nodeId),
-                        owner: ownCopy(owner),
+                        epoch,
+                        nodeId,
+                        owner,
                         method: ownCopy(method),
                         params: storedParams(params),
                         duration: parseFloat(duration),
                         status: ownCopy(status),
                         lineIndex: currentLine
                     });
+                    pruneOldest(poolNodesMap, maxLogEntries);
                     newEntriesCount++;
-                    lastProcessedIndexes.poolNodes = currentLine;
-                    currentByte += Buffer.byteLength(line + '\n', 'utf8');
                 }
-                lastByteOffsets.poolNodes = currentByte;
-                resolve();
-            });
-            
-            stream.on('error', reject);
+
+                // Timing: at least 7 fields (timestamp, epoch, nodeId, owner, method, params, duration),
+                // and a nodeId that isn't a 13-digit epoch (a shifted line)
+                if (parts.length >= 7 && nodeId && nodeId.trim() && !/^\d{13}$/.test(nodeId.trim())) {
+                    const durationValue = parseFloat(duration);
+                    if (!isNaN(durationValue)) {
+                        let arr = poolNodesTimingMap.get(nodeId);
+                        if (!arr) {
+                            arr = [];
+                            poolNodesTimingMap.set(nodeId, arr);
+                        }
+                        arr.push(durationValue);
+                        // Trim oldest entries when array exceeds cap to prevent unbounded growth
+                        if (arr.length > maxTimingEntriesPerNode) {
+                            arr.splice(0, arr.length - maxTimingEntriesPerNode);
+                        }
+                        newTimingCount++;
+                    }
+                }
+
+                recordNodeTimeoutSample(nodeTimeoutCounts, epoch, nodeId, owner, status);
+            }
+            lastProcessedIndexes.poolNodes = currentLine;
+            currentLine++;
         });
-        
-        // Prune oldest entries if needed
-        if (targetMap.size > maxLogEntries) {
-            const entriesToRemove = Array.from(targetMap.entries())
-                .sort((a, b) => a[1].lineIndex - b[1].lineIndex)
-                .slice(0, targetMap.size - maxLogEntries);
-            entriesToRemove.forEach(([key]) => targetMap.delete(key));
-        }
-        
+
+        const pruned = pruneNodeTimeoutCounts(nodeTimeoutCounts);
+
         if (newEntriesCount > 0) {
-            console.log(`Added ${newEntriesCount} new entries to poolNodesMap. Total entries: ${targetMap.size}`);
+            console.log(`Added ${newEntriesCount} new entries to poolNodesMap (${newTimingCount} timings). Total entries: ${poolNodesMap.size}, timing nodes: ${poolNodesTimingMap.size}, timeout hour buckets: ${nodeTimeoutCounts.size} (pruned ${pruned})`);
         }
+        return reset || newEntriesCount > 0 || newTimingCount > 0 || pruned > 0;
     } catch (error) {
-        console.error('Error parsing poolNodesMap log file:', error);
+        console.error('Error parsing poolNodes log file:', error);
+        return false;
     }
 }
 
 /**
  * Parse pool compare results log file - only stores mismatches
+ * @returns {Promise<boolean>} - true if targetMap changed
  */
 async function parsePoolCompareResultsLog(logPath, targetMap, lastProcessedIndexes, lastByteOffsets) {
     try {
-        let newEntriesCount = 0;
-        const lastProcessedIndex = lastProcessedIndexes.poolCompareResults;
-        
-        // Keep existing mismatched entries
-        const mismatchedEntries = [];
-        targetMap.forEach((value, key) => {
-            if (!value.resultsMatch) {
-                mismatchedEntries.push({ key, value });
-            }
-        });
-        
-        // On first run, calculate starting position
-        let startLine = 0;
-        let startByte = 0;
-        
-        if (lastProcessedIndex === -1) {
-            const totalLines = await countLines(logPath);
-            console.log(`poolCompareResults: Scanning ${totalLines} total lines for mismatches on initial load`);
-        } else {
-            // Subsequent runs - start from where we left off
-            startLine = lastProcessedIndex + 1;
-            startByte = lastByteOffsets.poolCompareResults;
-        }
-        
-        // Check if file exists and get its size
+        let startByte = lastByteOffsets.poolCompareResults;
+        let reset = false;
+
         const stats = await fs.promises.stat(logPath);
-        if (stats.size === startByte) {
-            // No new data
-            return;
-        }
-        
+
         // If file was truncated or is smaller than our offset, reset
         if (stats.size < startByte) {
             console.log(`poolCompareResults: Log file was rotated or truncated, re-reading from start`);
             targetMap.clear();
             lastProcessedIndexes.poolCompareResults = -1;
             lastByteOffsets.poolCompareResults = 0;
-            startLine = 0;
+            reset = true;
             startByte = 0;
         }
-        
-        // Initialize currentLine to startLine since we're reading from that position
-        let currentLine = startLine;
-        let currentByte = startByte;
-        let lineBuffer = '';
-        
-        await new Promise((resolve, reject) => {
-            const stream = fs.createReadStream(logPath, {
-                start: startByte,
-                encoding: 'utf8'
-            });
-            
-            stream.on('data', (chunk) => {
-                lineBuffer += chunk;
-                const lines = lineBuffer.split('\n');
-                // Keep the last incomplete line in buffer
-                lineBuffer = lines.pop() || '';
-                
-                for (const line of lines) {
-                    if (line.trim()) {
-                        const [
-                            timestamp, epoch, resultsMatch, mismatchedNode, mismatchedOwner, 
-                            mismatchedResults, nodeId1, nodeResult1, nodeId2, nodeResult2, 
-                            nodeId3, nodeResult3, method, params
-                        ] = line.split('|');
-                        
-                        // Always update the last processed index
-                        lastProcessedIndexes.poolCompareResults = currentLine;
-                        
-                        // Only store mismatches
-                        if (resultsMatch === 'false') {
-                            const key = ownCopy(`${epoch}-${currentLine}`);
-                            const parsedMismatchedResults = mismatchedResults === '[]' ? [] : JSON.parse(mismatchedResults);
-                            const entry = {
-                                key,
-                                value: {
-                                    timestamp,
-                                    epoch,
-                                    resultsMatch: false,
-                                    mismatchedNode: mismatchedNode === 'nan' ? null : mismatchedNode,
-                                    mismatchedOwner: mismatchedOwner === 'nan' ? null : mismatchedOwner,
-                                    mismatchedResults: parsedMismatchedResults,
-                                    nodeId1,
-                                    nodeResult1: JSON.parse(nodeResult1),
-                                    nodeId2,
-                                    nodeResult2: JSON.parse(nodeResult2),
-                                    nodeId3,
-                                    nodeResult3: JSON.parse(nodeResult3),
-                                    method,
-                                    params,
-                                    lineIndex: currentLine
-                                }
-                            };
-                            mismatchedEntries.push(entry);
-                            newEntriesCount++;
-                        }
-                    }
-                    currentLine++;
-                    currentByte += Buffer.byteLength(line + '\n', 'utf8');
-                }
-            });
-            
-            stream.on('end', () => {
-                // Process last line if exists
-                if (lineBuffer.trim()) {
-                    const line = lineBuffer;
-                    const [
-                        timestamp, epoch, resultsMatch, mismatchedNode, mismatchedOwner, 
-                        mismatchedResults, nodeId1, nodeResult1, nodeId2, nodeResult2, 
-                        nodeId3, nodeResult3, method, params
-                    ] = line.split('|');
-                    
-                    lastProcessedIndexes.poolCompareResults = currentLine;
-                    
-                    if (resultsMatch === 'false') {
-                        const key = ownCopy(`${epoch}-${currentLine}`);
-                        const parsedMismatchedResults = mismatchedResults === '[]' ? [] : JSON.parse(mismatchedResults);
-                        const entry = {
-                            key,
+
+        if (stats.size === startByte) {
+            // No new data
+            return reset;
+        }
+
+        if (startByte === 0) {
+            console.log(`poolCompareResults: Scanning ${stats.size} bytes for mismatches on initial load`);
+        }
+
+        const newEntries = [];
+        let currentLine = lastProcessedIndexes.poolCompareResults + 1;
+        lastByteOffsets.poolCompareResults = await readLines(logPath, startByte, (line) => {
+            if (line.trim()) {
+                const [
+                    timestamp, epoch, resultsMatch, mismatchedNode, mismatchedOwner,
+                    mismatchedResults, nodeId1, nodeResult1, nodeId2, nodeResult2,
+                    nodeId3, nodeResult3, method, params
+                ] = line.split('|');
+
+                // Only store mismatches
+                if (resultsMatch === 'false') {
+                    try {
+                        newEntries.push({
+                            key: ownCopy(`${epoch}-${currentLine}`),
                             value: {
                                 timestamp,
                                 epoch,
                                 resultsMatch: false,
                                 mismatchedNode: mismatchedNode === 'nan' ? null : mismatchedNode,
                                 mismatchedOwner: mismatchedOwner === 'nan' ? null : mismatchedOwner,
-                                mismatchedResults: parsedMismatchedResults,
+                                mismatchedResults: mismatchedResults === '[]' ? [] : JSON.parse(mismatchedResults),
                                 nodeId1,
                                 nodeResult1: JSON.parse(nodeResult1),
                                 nodeId2,
@@ -423,19 +270,28 @@ async function parsePoolCompareResultsLog(logPath, targetMap, lastProcessedIndex
                                 params,
                                 lineIndex: currentLine
                             }
-                        };
-                        mismatchedEntries.push(entry);
-                        newEntriesCount++;
+                        });
+                    } catch (error) {
+                        console.error(`poolCompareResults: skipping unreadable line ${currentLine}: ${error.message}`);
                     }
-                    currentByte += Buffer.byteLength(line + '\n', 'utf8');
                 }
-                lastByteOffsets.poolCompareResults = currentByte;
-                resolve();
-            });
-            
-            stream.on('error', reject);
+            }
+            lastProcessedIndexes.poolCompareResults = currentLine;
+            currentLine++;
         });
-        // Sort mismatched entries by timestamp (newest first)
+
+        if (newEntries.length === 0) {
+            return reset;
+        }
+
+        // Keep existing mismatched entries, add the new ones, newest first (timestamp, then line)
+        const mismatchedEntries = [];
+        targetMap.forEach((value, key) => {
+            if (!value.resultsMatch) {
+                mismatchedEntries.push({ key, value });
+            }
+        });
+        mismatchedEntries.push(...newEntries);
         mismatchedEntries.sort((a, b) => {
             const timeA = new Date(a.value.timestamp).getTime();
             const timeB = new Date(b.value.timestamp).getTime();
@@ -444,202 +300,21 @@ async function parsePoolCompareResultsLog(logPath, targetMap, lastProcessedIndex
             }
             return b.value.lineIndex - a.value.lineIndex;
         });
-        // Clear and re-add only mismatched entries
         targetMap.clear();
         mismatchedEntries.forEach(({key, value}) => {
             targetMap.set(key, value);
         });
-        if (newEntriesCount > 0) {
-            console.log(`Added ${newEntriesCount} new mismatched entries to poolCompareResultsMap. Total mismatched entries: ${targetMap.size}`);
-        }
+        console.log(`Added ${newEntries.length} new mismatched entries to poolCompareResultsMap. Total mismatched entries: ${targetMap.size}`);
+        return true;
     } catch (error) {
         console.error('Error parsing poolCompareResultsMap log file:', error);
-    }
-}
-
-/**
- * Parse pool node timing log file
- * Accumulates timing data for each node
- */
-async function parsePoolNodeTimingLog(logPath, poolNodesTimingMap) {
-    try {
-        let currentLine = 0;
-        let newEntriesCount = 0;
-        
-        // Check if file exists and get its size
-        const stats = await fs.promises.stat(logPath);
-        
-        // Detect if file was truncated or rotated
-        // If lastProcessedIndex is greater than total lines, we need to reset
-        const totalLines = await countLines(logPath);
-        if (poolNodesTimingMap.lastProcessedIndex && poolNodesTimingMap.lastProcessedIndex >= totalLines) {
-            console.log('poolNodesTimingMap: Log file was rotated or truncated, clearing map and re-reading');
-            poolNodesTimingMap.clear();
-            poolNodesTimingMap.lastProcessedIndex = -1;
-        }
-        
-        // We want to keep all durations for each node, but only add new ones
-        await new Promise((resolve, reject) => {
-            const rl = readline.createInterface({
-                input: fs.createReadStream(logPath),
-                crlfDelay: Infinity
-            });
-            rl.on('line', (line) => {
-                if (currentLine > (poolNodesTimingMap.lastProcessedIndex || -1)) {
-                    // Validate line has content and proper format
-                    if (line.trim()) {
-                        const parts = line.split('|');
-                        // Validate we have at least 7 fields (timestamp, epoch, nodeId, owner, method, params, duration)
-                        if (parts.length >= 7) {
-                            const [, , nodeId, , , , duration] = parts;
-                            // Validate nodeId doesn't look like an epoch timestamp
-                            // Epoch timestamps are 13 digits (milliseconds since 1970)
-                            // NodeIds should be longer strings with hyphens and special chars
-                            if (nodeId && nodeId.trim() && !/^\d{13}$/.test(nodeId.trim())) {
-                                if (!poolNodesTimingMap.has(nodeId)) {
-                                    poolNodesTimingMap.set(nodeId, []);
-                                }
-                                const durationValue = parseFloat(duration);
-                                if (!isNaN(durationValue)) {
-                                    const arr = poolNodesTimingMap.get(nodeId);
-                                    arr.push(durationValue);
-                                    // Trim oldest entries when array exceeds cap to prevent unbounded growth
-                                    if (arr.length > maxTimingEntriesPerNode) {
-                                        arr.splice(0, arr.length - maxTimingEntriesPerNode);
-                                    }
-                                    newEntriesCount++;
-                                }
-                            }
-                        }
-                    }
-                    poolNodesTimingMap.lastProcessedIndex = currentLine;
-                }
-                currentLine++;
-            });
-            rl.on('close', resolve);
-            rl.on('error', reject);
-        });
-        if (newEntriesCount > 0) {
-            console.log(`Added ${newEntriesCount} timing entries to poolNodesTimingMap. Total nodes: ${poolNodesTimingMap.size}`);
-        }
-    } catch (error) {
-        console.error('Error parsing poolNodesTimingMap log file:', error);
-    }
-}
-
-/**
- * Parse pool node timeout cache
- * Keeps track of node timeouts for the last 7 days
- */
-async function parsePoolNodeTimeoutCache(logPath, poolNodesTimeoutCache, lastByteOffsets) {
-    try {
-        let newEntriesCount = 0;
-        const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-        const startByte = lastByteOffsets.poolNodesTimeout;
-        
-        // Check if file exists and get its size
-        const stats = await fs.promises.stat(logPath);
-        if (stats.size === startByte) {
-            // No new data, just prune old entries
-            const entriesToRemove = [];
-            poolNodesTimeoutCache.forEach((entry, key) => {
-                const entryEpoch = parseInt(entry.epoch);
-                if (entryEpoch < sevenDaysAgo) {
-                    entriesToRemove.push(key);
-                }
-            });
-            entriesToRemove.forEach(key => poolNodesTimeoutCache.delete(key));
-            if (entriesToRemove.length > 0) {
-                console.log(`Pruned ${entriesToRemove.length} old entries from poolNodesTimeoutCache. Total entries: ${poolNodesTimeoutCache.size}`);
-            }
-            return;
-        }
-        
-        // If file was truncated or is smaller than our offset, reset
-        if (stats.size < startByte) {
-            console.log('Log file was rotated or truncated, resetting poolNodesTimeoutCache');
-            poolNodesTimeoutCache.clear();
-            lastByteOffsets.poolNodesTimeout = 0;
-        }
-        
-        let currentByte = lastByteOffsets.poolNodesTimeout;
-        let lineBuffer = '';
-        
-        await new Promise((resolve, reject) => {
-            const stream = fs.createReadStream(logPath, { 
-                start: lastByteOffsets.poolNodesTimeout,
-                encoding: 'utf8'
-            });
-            
-            stream.on('data', (chunk) => {
-                lineBuffer += chunk;
-                const lines = lineBuffer.split('\n');
-                // Keep the last incomplete line in buffer
-                lineBuffer = lines.pop() || '';
-                
-                for (const line of lines) {
-                    if (line.trim()) {
-                        const [, epoch, nodeId, owner, , , , status] = line.split('|');
-                        const key = ownCopy(`${epoch}-${nodeId}-${currentByte}`);
-                        poolNodesTimeoutCache.set(key, {
-                            epoch: ownCopy(epoch),
-                            nodeId: ownCopy(nodeId),
-                            owner: ownCopy(owner),
-                            status: ownCopy(status)
-                        });
-                        newEntriesCount++;
-                    }
-                    currentByte += Buffer.byteLength(line + '\n', 'utf8');
-                }
-            });
-            
-            stream.on('end', () => {
-                // Process last line if exists
-                if (lineBuffer.trim()) {
-                    const line = lineBuffer;
-                    const [, epoch, nodeId, owner, , , , status] = line.split('|');
-                    const key = ownCopy(`${epoch}-${nodeId}-${currentByte}`);
-                    poolNodesTimeoutCache.set(key, {
-                        epoch: ownCopy(epoch),
-                        nodeId: ownCopy(nodeId),
-                        owner: ownCopy(owner),
-                        status: ownCopy(status)
-                    });
-                    newEntriesCount++;
-                    currentByte += Buffer.byteLength(line + '\n', 'utf8');
-                }
-                lastByteOffsets.poolNodesTimeout = currentByte;
-                resolve();
-            });
-            
-            stream.on('error', reject);
-        });
-        
-        // Prune entries older than 7 days
-        const entriesToRemove = [];
-        poolNodesTimeoutCache.forEach((entry, key) => {
-            const entryEpoch = parseInt(entry.epoch);
-            if (entryEpoch < sevenDaysAgo) {
-                entriesToRemove.push(key);
-            }
-        });
-        entriesToRemove.forEach(key => poolNodesTimeoutCache.delete(key));
-        
-        if (newEntriesCount > 0) {
-            console.log(`Added ${newEntriesCount} timeout entries to poolNodesTimeoutCache (read from byte ${startByte} to ${currentByte}). Total entries: ${poolNodesTimeoutCache.size} (pruned ${entriesToRemove.length} old entries)`);
-        } else if (entriesToRemove.length > 0) {
-            console.log(`Pruned ${entriesToRemove.length} old entries from poolNodesTimeoutCache. Total entries: ${poolNodesTimeoutCache.size}`);
-        }
-    } catch (error) {
-        console.error('Error parsing poolNodesTimeoutCache log file:', error);
+        return false;
     }
 }
 
 module.exports = {
     parseLogFile,
-    parsePoolNodeLog,
+    parsePoolNodesLog,
     parsePoolCompareResultsLog,
-    parsePoolNodeTimingLog,
-    parsePoolNodeTimeoutCache
+    pruneOldest
 };
-

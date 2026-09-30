@@ -87,7 +87,6 @@ function getDashboardMetrics(
     fallbackRequestsMap,
     cacheRequestsMap,
     poolRequestsMap,
-    poolNodesMap,
     poolNodesTimingMap,
     requestHistory
 ) {
@@ -109,10 +108,9 @@ function getDashboardMetrics(
     let totalCacheTime = 0;
     let totalPoolTime = 0;
     
-    // Object to store method-based, origin-based, and node-based times for ALL requests
+    // Object to store method-based and origin-based times for ALL requests
     const methodTimes = {};
     const originTimes = {};
-    const nodeTimes = {};
     
     // Arrays to store request times for different types
     const fallbackRequestTimesLastHour = [];
@@ -222,15 +220,6 @@ function getDashboardMetrics(
         }
     });
 
-    // Process node durations from poolNodesMap
-    poolNodesMap.forEach(entry => {
-        const nodeId = entry.nodeId;
-        if (!nodeTimes[nodeId]) {
-            nodeTimes[nodeId] = [];
-        }
-        nodeTimes[nodeId].push(parseFloat(entry.duration));
-    });
-    
     // Calculate percentiles for each method and origin using ALL data
     const methodDurationHist = {};
     Object.entries(methodTimes).forEach(([method, times]) => {
@@ -373,34 +362,63 @@ function isNodeFailureStatus(status) {
     return typeof status === 'string' && /"code"\s*:\s*-70000\b/.test(status);
 }
 
-function calculateNodeTimeoutMetrics(poolNodesTimeoutCache, timeframe = 'week') {
+// Node requests counted per node per hour (getStartOfHour), for the last 7 days: the only thing the
+// timeout metrics need, instead of one record per poolNodes.log line.
+// Key `${nodeId}|${hourMs}` → { nodeId, owner, hourMs, total, failures }. owner is the one on the
+// bucket's first line.
+const nodeTimeoutWindowMs = 7 * 24 * 60 * 60 * 1000;
+
+function recordNodeTimeoutSample(nodeTimeoutCounts, epoch, nodeId, owner, status) {
+    const epochMs = parseInt(epoch);
+    if (isNaN(epochMs)) return;
+    const hourMs = getStartOfHour(epochMs);
+    const key = `${nodeId}|${hourMs}`;
+    let bucket = nodeTimeoutCounts.get(key);
+    if (!bucket) {
+        bucket = { nodeId, owner, hourMs, total: 0, failures: 0 };
+        nodeTimeoutCounts.set(key, bucket);
+    }
+    bucket.total++;
+    if (isNodeFailureStatus(status)) bucket.failures++;
+}
+
+// Drop hours that are entirely older than the 7-day window
+function pruneNodeTimeoutCounts(nodeTimeoutCounts, now = Date.now()) {
+    const oldestHour = getStartOfHour(now - nodeTimeoutWindowMs);
+    let pruned = 0;
+    nodeTimeoutCounts.forEach((bucket, key) => {
+        if (bucket.hourMs < oldestHour) {
+            nodeTimeoutCounts.delete(key);
+            pruned++;
+        }
+    });
+    return pruned;
+}
+
+// The window is whole hours: every hour that overlaps the last day (or week) counts. The metrics
+// are recomputed when the hour changes, when that is the same as the exact window to the second.
+function calculateNodeTimeoutMetrics(nodeTimeoutCounts, timeframe = 'week') {
     const daysToLookBack = timeframe === 'day' ? 1 : 7;
-    const timeAgo = Date.now() - (daysToLookBack * 24 * 60 * 60 * 1000);
+    const oldestHour = getStartOfHour(Date.now() - (daysToLookBack * 24 * 60 * 60 * 1000));
     const nodeStats = new Map();
 
-    // Process each entry in poolNodesTimeoutCache
-    poolNodesTimeoutCache.forEach(entry => {
-        const epoch = parseInt(entry.epoch);
-        if (epoch >= timeAgo) {
-            const fullNodeId = entry.nodeId;
-            const owner = entry.owner;
-            const status = entry.status;
+    nodeTimeoutCounts.forEach(bucket => {
+        if (bucket.hourMs >= oldestHour) {
+            const fullNodeId = bucket.nodeId;
 
             // Use full nodeId as key for aggregating stats
             if (!nodeStats.has(fullNodeId)) {
                 nodeStats.set(fullNodeId, {
                     fullNodeId,
-                    owner,
+                    owner: bucket.owner,
                     totalRequests: 0,
                     timeoutRequests: 0
                 });
             }
 
             const stats = nodeStats.get(fullNodeId);
-            stats.totalRequests++;
-            if (isNodeFailureStatus(status)) {
-                stats.timeoutRequests++;
-            }
+            stats.totalRequests += bucket.total;
+            stats.timeoutRequests += bucket.failures;
         }
     });
 
@@ -432,6 +450,8 @@ module.exports = {
     getDashboardMetrics,
     updateRequestorMetrics,
     calculateNodeTimeoutMetrics,
+    recordNodeTimeoutSample,
+    pruneNodeTimeoutCounts,
     isNodeFailureStatus
 };
 
