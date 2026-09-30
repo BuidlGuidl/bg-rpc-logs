@@ -21,6 +21,15 @@ const { maxLogEntries, maxRequestHistoryHours, maxDashboardAgeMs, defaultPageLim
 const PAGE_FILTERS = ['all', 'no-client', 'success', 'warning', 'error'];
 const STATUS_FILTER_CLASS = { success: 'ok', warning: 'warning', error: 'error' };
 
+// Search on the logs page: method (exact) and q (text, any case) in these fields of each table
+const SEARCH_FIELDS = {
+    request: ['requester', 'ip', 'method', 'params', 'status'],
+    node: ['nodeId', 'owner', 'method', 'params', 'status'],
+    compare: ['mismatchedNode', 'mismatchedOwner', 'nodeId1', 'nodeId2', 'nodeId3', 'method', 'params']
+};
+const MAX_METHOD_CHARS = 100;
+const MAX_SEARCH_CHARS = 200;
+
 /**
  * The logs service's data and its update cycle, without the HTTPS server (logs.js), so tests can
  * drive it. logDir holds the request, node and compare-results logs.
@@ -122,35 +131,51 @@ function createLogService(logDir) {
         return { statusCode: 200, body };
     }
 
-    // One page of a table, newest first, filtered: { total, page, limit, entries }. total counts
-    // the entries that pass the filter. Request and node entries carry their errorClass.
+    // One page of a table, newest first, filtered and searched:
+    // { total, page, limit, methods, entries }. total counts the entries that pass; methods lists
+    // every method in the table (for the page's method dropdown). Request and node entries carry
+    // their errorClass.
     function respondPage(targetMap, searchParams) {
         const page = Number(searchParams.get('page'));
         const limit = searchParams.has('limit') ? Number(searchParams.get('limit')) : defaultPageLimit;
         const filter = searchParams.get('filter') || 'all';
-        if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > maxPageLimit || !PAGE_FILTERS.includes(filter)) {
-            return { statusCode: 400, body: JSON.stringify({ error: `page must be >= 1, limit 1-${maxPageLimit}, filter one of ${PAGE_FILTERS.join(', ')}` }) };
+        const method = searchParams.get('method') || '';
+        const q = searchParams.get('q') || '';
+        if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > maxPageLimit ||
+            !PAGE_FILTERS.includes(filter) || method.length > MAX_METHOD_CHARS || q.length > MAX_SEARCH_CHARS) {
+            return { statusCode: 400, body: JSON.stringify({ error: `page must be >= 1, limit 1-${maxPageLimit}, filter one of ${PAGE_FILTERS.join(', ')}, method up to ${MAX_METHOD_CHARS} and q up to ${MAX_SEARCH_CHARS} characters` }) };
         }
 
         // Request and node tables are in file order; compare results are kept newest first
         const isCompare = targetMap === poolCompareResultsMap;
+        const kind = isCompare ? 'compare' : targetMap === poolNodesMap ? 'node' : 'request';
         const newestFirst = Array.from(targetMap.values());
         if (!isCompare) newestFirst.reverse();
 
-        let matching = newestFirst;
+        const tests = [];
         if (filter !== 'all') {
             if (isCompare) {
-                matching = newestFirst.filter(entry => (filter === 'success') === Boolean(entry.resultsMatch));
+                tests.push(entry => (filter === 'success') === Boolean(entry.resultsMatch));
             } else if (filter === 'no-client') {
-                matching = newestFirst.filter(entry => entry.requester !== 'buidlguidl-client');
+                tests.push(entry => entry.requester !== 'buidlguidl-client');
             } else {
-                matching = newestFirst.filter(entry => classifyStatus(entry.status) === STATUS_FILTER_CLASS[filter]);
+                tests.push(entry => classifyStatus(entry.status) === STATUS_FILTER_CLASS[filter]);
             }
         }
+        if (method) {
+            tests.push(entry => entry.method === method);
+        }
+        if (q) {
+            const text = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+            const fields = SEARCH_FIELDS[kind];
+            tests.push(entry => fields.some(field => typeof entry[field] === 'string' && text.test(entry[field])));
+        }
+        const matching = tests.length ? newestFirst.filter(entry => tests.every(test => test(entry))) : newestFirst;
 
+        const methods = [...new Set(newestFirst.map(entry => entry.method).filter(m => typeof m === 'string' && m))].sort();
         const entries = matching.slice((page - 1) * limit, page * limit)
             .map(entry => (isCompare ? entry : { ...entry, errorClass: classifyStatus(entry.status) }));
-        return { statusCode: 200, body: JSON.stringify({ total: matching.length, page, limit, entries }) };
+        return { statusCode: 200, body: JSON.stringify({ total: matching.length, page, limit, methods, entries }) };
     }
 
     // Free responses whose data has changed (the request logs' are ~40 MB each)

@@ -96,6 +96,23 @@ fs.writeFileSync(path.join(dir, 'poolCompareResults.log'), '');
     assert.strictEqual(service.respond(`/poolRequests?${bad}`).statusCode, 400, bad);
   }
   assert.strictEqual(service.respond('/dashboard?page=1').statusCode, 200, 'page is ignored outside the tables');
+
+  // ---- search: method (exact), q (text in the table's fields, any case), methods for the dropdown
+  assert.deepStrictEqual(page('/poolRequests?page=1').methods, ['eth_blockNumber', 'eth_call']);
+  assert.strictEqual(page('/poolRequests?page=1&method=eth_call').total, 5);
+  assert.strictEqual(page('/poolRequests?page=1&method=eth_cal').total, 0, 'method is exact');
+  assert.deepStrictEqual(page('/poolRequests?page=1&method=eth_call&filter=error').entries.map((e) => e.elapsed), [2], 'with a filter');
+  assert.deepStrictEqual(page('/poolRequests?page=1&method=eth_call&filter=error').methods, ['eth_blockNumber', 'eth_call'], 'methods: the whole table');
+  assert.strictEqual(page('/poolRequests?page=1&q=BUIDLGUIDL-CLIENT').total, 1, 'requester, any case');
+  assert.strictEqual(page('/poolRequests?page=1&q=203.0.113.7').total, 5, 'ip; the dots are literal');
+  assert.strictEqual(page('/poolRequests?page=1&q=203x0').total, 0);
+  assert.deepStrictEqual(page('/poolRequests?page=1&q=Internal%20Proxy').entries.map((e) => e.elapsed), [2], 'status');
+  assert.strictEqual(page('/poolRequests?page=1&q=' + encodeURIComponent('{"to":"0x1"}')).total, 3, 'params, special characters literal');
+  assert.strictEqual(page('/poolNodes?page=1&q=owner-a').total, 3, 'node owner');
+  assert.strictEqual(page('/poolCompareResults?page=1&q=node-c').total, 2, 'compare node ids');
+  assert.strictEqual(page('/poolCompareResults?page=1&q=node-z').total, 0);
+  assert.strictEqual(service.respond('/poolRequests?page=1&q=' + 'x'.repeat(201)).statusCode, 400);
+  assert.strictEqual(service.respond('/poolRequests?page=1&method=' + 'x'.repeat(101)).statusCode, 400);
   assert.ok(Array.isArray(JSON.parse(service.respond('/poolRequests').body)), 'without page: the whole table, as before');
   assert.strictEqual(JSON.parse(service.respond('/poolRequests').body)[0].errorClass, undefined);
 
