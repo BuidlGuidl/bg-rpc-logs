@@ -25,4 +25,14 @@ assert.strictEqual(classifyStatus(JSON.stringify({ jsonrpc: '2.0', id: 1 })), 'e
 // a bare error object (no jsonrpc wrapper) is read too
 assert.strictEqual(classifyStatus(JSON.stringify({ code: -32001, message: 'block not found: 0x1' })), 'caller');
 assert.strictEqual(classifyStatus('success'), 'ok');
+
+// pool node log shapes (moved from bg-rpc-web-server with the logs page's classes, plan D1)
+for (const st of ['timeout_error', 'timeout_error_heavy']) assert.strictEqual(classifyStatus(st), 'warning', st);
+for (const st of ['socket_error', 'invalid_format', 'invalid_response', 'garbage']) assert.strictEqual(classifyStatus(st), 'error', st);
+assert.strictEqual(classifyStatus(JSON.stringify({ code: -70000, message: 'Internal node error' })), 'error');
+assert.strictEqual(classifyStatus(JSON.stringify({ code: 3, message: 'execution reverted' })), 'caller');
+assert.strictEqual(classifyStatus('-32601'), 'caller', 'a bare ignored code');
+assert.strictEqual(classifyStatus('-70000'), 'error', 'a bare code that is ours');
+assert.strictEqual(classifyStatus(' Success '), 'ok');
+assert.strictEqual(classifyStatus(undefined), 'error');
 console.log('errorClass: all passed');

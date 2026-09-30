@@ -62,6 +62,43 @@ fs.writeFileSync(path.join(dir, 'poolCompareResults.log'), '');
   Date.now = realNow;
   assert.strictEqual(versions.dashboard, dashboardVersion + 2);
 
+  // ---- paged views (logs page): newest first, filtered, with each entry's error class
+  const err = JSON.stringify({ jsonrpc: '2.0', error: { code: -70000, message: 'Internal Proxy service error' }, id: 1 });
+  const rev = JSON.stringify({ jsonrpc: '2.0', error: { code: 3, message: 'execution reverted' }, id: 1 });
+  fs.appendFileSync(path.join(dir, 'poolRequests.log'),
+    `v2|2026-09-30 12:00:04|${now - 5000 + 4}|buidlguidl-client|-|eth_blockNumber||1|success\n` +
+    `v2|2026-09-30 12:00:05|${now - 5000 + 5}|https://app.example|203.0.113.7|eth_call|{}|2|${err}\n` +
+    `v2|2026-09-30 12:00:06|${now - 5000 + 6}|https://app.example|203.0.113.7|eth_call|{}|3|${rev}\n`);
+  fs.appendFileSync(path.join(dir, 'poolNodes.log'), `2026-09-30 12:00:07|${now}|node-a|owner-a|eth_call|{}|5000|timeout_error\n`);
+  const cmp = (i, match) => [`2026-09-30 12:00:0${i}`, now + i, match, 'node-b', 'owner-b', '[]', 'node-a', '"0x1"', 'node-b', '"0x2"', 'node-c', '"0x1"', 'eth_call', '{}'].join('|');
+  fs.appendFileSync(path.join(dir, 'poolCompareResults.log'), [cmp(1, 'false'), cmp(2, 'true'), cmp(3, 'false')].join('\n') + '\n');
+  await service.tick();
+  const page = (url) => { const r = service.respond(url); assert.strictEqual(r.statusCode, 200, url); return JSON.parse(r.body); };
+
+  let p = page('/poolRequests?page=1&limit=2&filter=all');
+  assert.strictEqual(p.total, 6);
+  assert.deepStrictEqual(p.entries.map((e) => e.elapsed), [3, 2], 'newest first');
+  assert.deepStrictEqual(p.entries.map((e) => e.errorClass), ['caller', 'error']);
+  assert.deepStrictEqual(page('/poolRequests?page=3&limit=2&filter=all').entries.map((e) => e.elapsed), [11, 10]);
+  assert.deepStrictEqual(page('/poolRequests?page=4&limit=2&filter=all').entries, [], 'past the end: empty page, same total');
+  assert.strictEqual(page('/poolRequests?page=1&filter=no-client').total, 5);
+  assert.deepStrictEqual(page('/poolRequests?page=1&filter=error').entries.map((e) => e.elapsed), [2]);
+  assert.strictEqual(page('/poolRequests?page=1&filter=success').total, 4, 'the reverted call is the caller\'s: neither success nor error');
+  assert.strictEqual(page('/poolRequests?page=1').limit, 30, 'default limit');
+  assert.deepStrictEqual(page('/poolNodes?page=1&filter=warning').entries.map((e) => [e.status, e.errorClass]), [['timeout_error', 'warning']]);
+  assert.strictEqual(page('/poolNodes?page=1&filter=no-client').total, 3, 'node entries have no requester: all kept');
+  p = page('/poolCompareResults?page=1&filter=all');
+  assert.deepStrictEqual(p.entries.map((e) => e.lineIndex), [2, 0], 'only mismatches are kept, newest first');
+  assert.strictEqual(p.entries[0].errorClass, undefined);
+  assert.strictEqual(page('/poolCompareResults?page=1&filter=success').total, 0);
+  assert.strictEqual(page('/poolCompareResults?page=1&filter=no-client').total, 2, 'any filter but all/success: mismatches');
+  for (const bad of ['page=0', 'page=x', 'page=1&limit=0', 'page=1&limit=1001', 'page=1&filter=nope']) {
+    assert.strictEqual(service.respond(`/poolRequests?${bad}`).statusCode, 400, bad);
+  }
+  assert.strictEqual(service.respond('/dashboard?page=1').statusCode, 200, 'page is ignored outside the tables');
+  assert.ok(Array.isArray(JSON.parse(service.respond('/poolRequests').body)), 'without page: the whole table, as before');
+  assert.strictEqual(JSON.parse(service.respond('/poolRequests').body)[0].errorClass, undefined);
+
   console.log = log;
   fs.rmSync(dir, { recursive: true });
   console.log('logService: all passed');

@@ -12,7 +12,14 @@ const {
     updateRequestorMetrics,
     calculateNodeTimeoutMetrics
 } = require('./utils/metricsCalculators');
-const { maxLogEntries, maxRequestHistoryHours, maxDashboardAgeMs } = require('./config');
+const { classifyStatus } = require('./utils/errorClass');
+const { maxLogEntries, maxRequestHistoryHours, maxDashboardAgeMs, defaultPageLimit, maxPageLimit } = require('./config');
+
+// Filters the logs page offers. Request and node tables: 'no-client' drops buidlguidl-client's
+// requests, success / warning / error keep one error class (utils/errorClass.js). Compare
+// results: 'success' keeps matches, any other filter but 'all' keeps mismatches.
+const PAGE_FILTERS = ['all', 'no-client', 'success', 'warning', 'error'];
+const STATUS_FILTER_CLASS = { success: 'ok', warning: 'warning', error: 'error' };
 
 /**
  * The logs service's data and its update cycle, without the HTTPS server (logs.js), so tests can
@@ -87,25 +94,69 @@ function createLogService(logDir) {
     };
     const responseCache = new Map(); // url -> { version, body }
 
+    // Tables the logs page reads a page at a time
+    const pagedTables = {
+        '/fallbackRequests': fallbackRequestsMap,
+        '/cacheRequests': cacheRequestsMap,
+        '/poolRequests': poolRequestsMap,
+        '/poolNodes': poolNodesMap,
+        '/poolCompareResults': poolCompareResultsMap
+    };
+
     function respond(url) {
-        const route = routes[url];
+        const { pathname, searchParams } = new URL(url, 'http://localhost');
+        if (searchParams.has('page') && pagedTables[pathname]) {
+            return respondPage(pagedTables[pathname], searchParams);
+        }
+        const route = routes[pathname];
         if (!route) {
             return { statusCode: 404, body: JSON.stringify({ error: 'Not found' }) };
         }
         const [source, build] = route;
-        const cached = responseCache.get(url);
+        const cached = responseCache.get(pathname);
         if (cached && cached.version === versions[source]) {
             return { statusCode: 200, body: cached.body };
         }
         const body = JSON.stringify(build(), null, 2);
-        responseCache.set(url, { version: versions[source], body });
+        responseCache.set(pathname, { version: versions[source], body });
         return { statusCode: 200, body };
+    }
+
+    // One page of a table, newest first, filtered: { total, page, limit, entries }. total counts
+    // the entries that pass the filter. Request and node entries carry their errorClass.
+    function respondPage(targetMap, searchParams) {
+        const page = Number(searchParams.get('page'));
+        const limit = searchParams.has('limit') ? Number(searchParams.get('limit')) : defaultPageLimit;
+        const filter = searchParams.get('filter') || 'all';
+        if (!Number.isInteger(page) || page < 1 || !Number.isInteger(limit) || limit < 1 || limit > maxPageLimit || !PAGE_FILTERS.includes(filter)) {
+            return { statusCode: 400, body: JSON.stringify({ error: `page must be >= 1, limit 1-${maxPageLimit}, filter one of ${PAGE_FILTERS.join(', ')}` }) };
+        }
+
+        // Request and node tables are in file order; compare results are kept newest first
+        const isCompare = targetMap === poolCompareResultsMap;
+        const newestFirst = Array.from(targetMap.values());
+        if (!isCompare) newestFirst.reverse();
+
+        let matching = newestFirst;
+        if (filter !== 'all') {
+            if (isCompare) {
+                matching = newestFirst.filter(entry => (filter === 'success') === Boolean(entry.resultsMatch));
+            } else if (filter === 'no-client') {
+                matching = newestFirst.filter(entry => entry.requester !== 'buidlguidl-client');
+            } else {
+                matching = newestFirst.filter(entry => classifyStatus(entry.status) === STATUS_FILTER_CLASS[filter]);
+            }
+        }
+
+        const entries = matching.slice((page - 1) * limit, page * limit)
+            .map(entry => (isCompare ? entry : { ...entry, errorClass: classifyStatus(entry.status) }));
+        return { statusCode: 200, body: JSON.stringify({ total: matching.length, page, limit, entries }) };
     }
 
     // Free responses whose data has changed (the request logs' are ~40 MB each)
     function dropStaleResponses() {
-        responseCache.forEach((cached, url) => {
-            if (cached.version !== versions[routes[url][0]]) responseCache.delete(url);
+        responseCache.forEach((cached, pathname) => {
+            if (cached.version !== versions[routes[pathname][0]]) responseCache.delete(pathname);
         });
     }
 

@@ -5,6 +5,8 @@ const maxRequestHistoryHours = 24 * 30; // Maximum number of hourly history entr
 const maxTimingEntriesPerNode = 10000; // Cap per-node duration arrays to prevent unbounded growth
 const maxParamsChars = 1000; // Longest params kept per request/node entry; the logs page only displays them
 const maxDashboardAgeMs = 60 * 1000; // Rebuild the dashboard at least this often even when no log changed
+const defaultPageLimit = 30; // Entries per page when a paged request (?page=) gives no limit
+const maxPageLimit = 1000; // Most entries one paged request may ask for
 
 module.exports = {
   logPort,
@@ -13,5 +15,7 @@ module.exports = {
   maxRequestHistoryHours,
   maxTimingEntriesPerNode,
   maxParamsChars,
-  maxDashboardAgeMs
+  maxDashboardAgeMs,
+  defaultPageLimit,
+  maxPageLimit
 };
