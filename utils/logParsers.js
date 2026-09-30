@@ -2,7 +2,21 @@ const { parseRequestLogLine } = require('./requestLogLine');
 const fs = require('fs');
 const readline = require('readline');
 const { countLines, getByteOffsetForLine } = require('./fileUtils');
-const { maxTimingEntriesPerNode } = require('../config');
+const { maxTimingEntriesPerNode, maxParamsChars } = require('../config');
+
+// A copy of a string that was cut from a larger one. split() returns slices that keep the whole
+// chunk they were cut from alive, so every entry we hold would pin ~64 KB of log text.
+function ownCopy(s) {
+    return typeof s === 'string' ? Buffer.from(s, 'utf8').toString('utf8') : s;
+}
+
+// params as stored and served, cut to maxParamsChars. Multicall eth_calls carry 8+ KB of calldata;
+// 40,000 of them made /poolRequests and /poolNodes ~300 MB each, and the logs page fetching both
+// at once ran this process out of heap.
+function storedParams(params) {
+    if (typeof params !== 'string' || params.length <= maxParamsChars) return ownCopy(params);
+    return `${ownCopy(params.slice(0, maxParamsChars))}… (${params.length} chars)`;
+}
 
 /**
  * Parse a standard log file incrementally
@@ -70,16 +84,16 @@ async function parseLogFile(logPath, targetMap, logType, lastProcessedIndexes, l
                     // v2 or legacy format (utils/requestLogLine.js); unreadable lines are skipped
                     const entry = parseRequestLogLine(line);
                     if (entry) {
-                        const key = `${entry.epoch}-${currentLine}`;
+                        const key = ownCopy(`${entry.epoch}-${currentLine}`);
                         targetMap.set(key, {
-                            timestamp: entry.timestamp,
-                            epoch: entry.epoch,
-                            requester: entry.requester || '',
-                            ip: entry.ip,
-                            method: entry.method,
-                            params: entry.params,
+                            timestamp: ownCopy(entry.timestamp),
+                            epoch: ownCopy(entry.epoch),
+                            requester: ownCopy(entry.requester || ''),
+                            ip: ownCopy(entry.ip),
+                            method: ownCopy(entry.method),
+                            params: storedParams(entry.params),
                             elapsed: entry.elapsed,
-                            status: entry.status,
+                            status: ownCopy(entry.status),
                             lineIndex: currentLine
                         });
                         newEntriesCount++;
@@ -98,16 +112,16 @@ async function parseLogFile(logPath, targetMap, logType, lastProcessedIndexes, l
                     const line = lineBuffer;
                     const entry = parseRequestLogLine(line);
                     if (entry) {
-                        const key = `${entry.epoch}-${currentLine}`;
+                        const key = ownCopy(`${entry.epoch}-${currentLine}`);
                         targetMap.set(key, {
-                            timestamp: entry.timestamp,
-                            epoch: entry.epoch,
-                            requester: entry.requester || '',
-                            ip: entry.ip,
-                            method: entry.method,
-                            params: entry.params,
+                            timestamp: ownCopy(entry.timestamp),
+                            epoch: ownCopy(entry.epoch),
+                            requester: ownCopy(entry.requester || ''),
+                            ip: ownCopy(entry.ip),
+                            method: ownCopy(entry.method),
+                            params: storedParams(entry.params),
                             elapsed: entry.elapsed,
-                            status: entry.status,
+                            status: ownCopy(entry.status),
                             lineIndex: currentLine
                         });
                         newEntriesCount++;
@@ -204,16 +218,16 @@ async function parsePoolNodeLog(logPath, targetMap, lastProcessedIndexes, lastBy
                 for (const line of lines) {
                     if (line.trim()) {
                         const [timestamp, epoch, nodeId, owner, method, params, duration, status] = line.split('|');
-                        const key = `${epoch}-${nodeId}-${currentLine}`;
+                        const key = ownCopy(`${epoch}-${nodeId}-${currentLine}`);
                         targetMap.set(key, {
-                            timestamp,
-                            epoch,
-                            nodeId,
-                            owner,
-                            method,
-                            params,
+                            timestamp: ownCopy(timestamp),
+                            epoch: ownCopy(epoch),
+                            nodeId: ownCopy(nodeId),
+                            owner: ownCopy(owner),
+                            method: ownCopy(method),
+                            params: storedParams(params),
                             duration: parseFloat(duration),
-                            status,
+                            status: ownCopy(status),
                             lineIndex: currentLine
                         });
                         newEntriesCount++;
@@ -229,16 +243,16 @@ async function parsePoolNodeLog(logPath, targetMap, lastProcessedIndexes, lastBy
                 if (lineBuffer.trim()) {
                     const line = lineBuffer;
                     const [timestamp, epoch, nodeId, owner, method, params, duration, status] = line.split('|');
-                    const key = `${epoch}-${nodeId}-${currentLine}`;
+                    const key = ownCopy(`${epoch}-${nodeId}-${currentLine}`);
                     targetMap.set(key, {
-                        timestamp,
-                        epoch,
-                        nodeId,
-                        owner,
-                        method,
-                        params,
+                        timestamp: ownCopy(timestamp),
+                        epoch: ownCopy(epoch),
+                        nodeId: ownCopy(nodeId),
+                        owner: ownCopy(owner),
+                        method: ownCopy(method),
+                        params: storedParams(params),
                         duration: parseFloat(duration),
-                        status,
+                        status: ownCopy(status),
                         lineIndex: currentLine
                     });
                     newEntriesCount++;
@@ -344,7 +358,7 @@ async function parsePoolCompareResultsLog(logPath, targetMap, lastProcessedIndex
                         
                         // Only store mismatches
                         if (resultsMatch === 'false') {
-                            const key = `${epoch}-${currentLine}`;
+                            const key = ownCopy(`${epoch}-${currentLine}`);
                             const parsedMismatchedResults = mismatchedResults === '[]' ? [] : JSON.parse(mismatchedResults);
                             const entry = {
                                 key,
@@ -388,7 +402,7 @@ async function parsePoolCompareResultsLog(logPath, targetMap, lastProcessedIndex
                     lastProcessedIndexes.poolCompareResults = currentLine;
                     
                     if (resultsMatch === 'false') {
-                        const key = `${epoch}-${currentLine}`;
+                        const key = ownCopy(`${epoch}-${currentLine}`);
                         const parsedMismatchedResults = mismatchedResults === '[]' ? [] : JSON.parse(mismatchedResults);
                         const entry = {
                             key,
@@ -566,12 +580,12 @@ async function parsePoolNodeTimeoutCache(logPath, poolNodesTimeoutCache, lastByt
                 for (const line of lines) {
                     if (line.trim()) {
                         const [, epoch, nodeId, owner, , , , status] = line.split('|');
-                        const key = `${epoch}-${nodeId}-${currentByte}`;
+                        const key = ownCopy(`${epoch}-${nodeId}-${currentByte}`);
                         poolNodesTimeoutCache.set(key, {
-                            epoch,
-                            nodeId,
-                            owner,
-                            status
+                            epoch: ownCopy(epoch),
+                            nodeId: ownCopy(nodeId),
+                            owner: ownCopy(owner),
+                            status: ownCopy(status)
                         });
                         newEntriesCount++;
                     }
@@ -584,12 +598,12 @@ async function parsePoolNodeTimeoutCache(logPath, poolNodesTimeoutCache, lastByt
                 if (lineBuffer.trim()) {
                     const line = lineBuffer;
                     const [, epoch, nodeId, owner, , , , status] = line.split('|');
-                    const key = `${epoch}-${nodeId}-${currentByte}`;
+                    const key = ownCopy(`${epoch}-${nodeId}-${currentByte}`);
                     poolNodesTimeoutCache.set(key, {
-                        epoch,
-                        nodeId,
-                        owner,
-                        status
+                        epoch: ownCopy(epoch),
+                        nodeId: ownCopy(nodeId),
+                        owner: ownCopy(owner),
+                        status: ownCopy(status)
                     });
                     newEntriesCount++;
                     currentByte += Buffer.byteLength(line + '\n', 'utf8');

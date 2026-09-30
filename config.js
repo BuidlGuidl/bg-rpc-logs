@@ -4,6 +4,7 @@ const poolNodeTimingParseInterval = 60 * 1000 * 10; // 10 minutes = 60 seconds *
 const maxLogEntries = 40000;
 const maxRequestHistoryHours = 24 * 30; // Maximum number of hourly history entries to keep (30 days)
 const maxTimingEntriesPerNode = 10000; // Cap per-node duration arrays to prevent unbounded growth
+const maxParamsChars = 1000; // Longest params kept per request/node entry; the logs page only displays them
 
 module.exports = {
   logPort,
@@ -11,5 +12,6 @@ module.exports = {
   poolNodeTimingParseInterval,
   maxLogEntries,
   maxRequestHistoryHours,
-  maxTimingEntriesPerNode
+  maxTimingEntriesPerNode,
+  maxParamsChars
 };

@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { parseRequestLogLine } = require('../utils/requestLogLine');
 const { parseLogFile } = require('../utils/logParsers');
+const { maxParamsChars } = require('../config');
 
 const fixture = (name) => fs.readFileSync(path.join(__dirname, 'fixtures', name), 'utf8').split('\n').filter((l) => l !== '');
 
@@ -73,6 +74,14 @@ assert.strictEqual(parseRequestLogLine(''), null);
   const lastKey = [...map.keys()].find((k) => k.startsWith('1790710002000-'));
   assert.strictEqual(lastKey, `1790710002000-${lines.length}`);
   assert.ok([...map.values()].some((e) => e.ip === '198.51.100.2'));
+  // params longer than maxParamsChars are stored cut, with their full length noted
+  const calldata = '0x82ad56cb' + '0'.repeat(8000);
+  fs.appendFileSync(file, `v2|2026-09-29 19:00:03|1790710003000|o|198.51.100.2|eth_call|{"data":"${calldata}"},latest|70|success\n`);
+  await parseLogFile(file, map, 'pool', idx, offsets, 100000);
+  const multicall = [...map.values()].find((e) => e.epoch === '1790710003000');
+  const fullLength = `{"data":"${calldata}"},latest`.length;
+  assert.strictEqual(multicall.params, `{"data":"${calldata}`.slice(0, maxParamsChars) + `… (${fullLength} chars)`);
+  assert.strictEqual(multicall.status, 'success');
   fs.unlinkSync(file);
   console.log('requestLogLine: all passed');
 })().catch((e) => { console.error(e); process.exit(1); });
