@@ -5,76 +5,56 @@ const { ignoredErrorCodes } = require('../../shared/ignoredErrorCodes');
 const { classifyStatus } = require('./errorClass');
 
 /**
- * Update request history with hourly aggregated data
+ * Count one request in its hour of the request history (the dashboard's Hourly Request History).
+ * Called for each request line as it is read, so every line counts once, whenever it arrives.
+ * (Before 2026-10-01 the history was rebuilt from the in-memory maps only at startup and when the
+ * hour changed, counting only hours after the newest one it had: the hour in progress at startup
+ * stayed as it was then. 14 fallbacks just after a restart never reached the chart.)
+ * @param {string} prefix - 'fallback', 'cache' or 'pool'
  */
-function updateRequestHistory(
-    requestHistory,
-    fallbackRequestsMap,
-    cacheRequestsMap,
-    poolRequestsMap,
-    maxRequestHistoryHours
-) {
-    // Find the latest hour we've processed
-    let latestProcessedHour = 0;
-    if (requestHistory.size > 0) {
-        latestProcessedHour = Math.max(...requestHistory.keys());
+function recordRequestHistory(requestHistory, entry, prefix) {
+    const entryHour = getStartOfHour(entry.epoch);
+    if (isNaN(entryHour)) return;
+
+    // Only count non-buidlguidl-client cache requests for nCacheRequests* fields
+    if (prefix === 'cache' && entry.requester === 'buidlguidl-client') {
+        return;
     }
-    
-    // Process all maps
-    [
-        { map: fallbackRequestsMap, prefix: 'fallback' },
-        { map: cacheRequestsMap, prefix: 'cache' },
-        { map: poolRequestsMap, prefix: 'pool' }
-    ].forEach(({ map, prefix }) => {
-        map.forEach(entry => {
-            const entryHour = getStartOfHour(entry.epoch);
-            
-            // Skip if this hour has already been processed
-            if (entryHour <= latestProcessedHour) {
-                return;
-            }
-            
-            if (!requestHistory.has(entryHour)) {
-                requestHistory.set(entryHour, {
-                    hourMs: entryHour,
-                    nCacheRequestsSuccess: 0,
-                    nCacheRequestsError: 0,
-                    nCacheRequestsWarning: 0,
-                    nPoolRequestsSuccess: 0,
-                    nPoolRequestsError: 0,
-                    nPoolRequestsWarning: 0,
-                    nFallbackRequestsSuccess: 0,
-                    nFallbackRequestsError: 0,
-                    nFallbackRequestsWarning: 0
-                });
-            }
-            
-            const hourData = requestHistory.get(entryHour);
-            
-            // Only count non-buidlguidl-client cache requests for nCacheRequests* fields
-            if (prefix === 'cache' && entry.requester === 'buidlguidl-client') {
-                return;
-            }
 
-            if (entry.status === 'success') {
-                hourData[`n${prefix.charAt(0).toUpperCase() + prefix.slice(1)}RequestsSuccess`]++;
-            } else {
-                // Only our failures count as errors; a caller's mistake doesn't (utils/errorClass.js)
-                const errorClass = classifyStatus(entry.status);
-                if (errorClass === 'caller' || errorClass === 'ok') return;
-                if (errorClass === 'warning') {
-                    hourData[`n${prefix.charAt(0).toUpperCase() + prefix.slice(1)}RequestsWarning`]++;
-                } else {
-                    hourData[`n${prefix.charAt(0).toUpperCase() + prefix.slice(1)}RequestsError`]++;
-                }
-            }
+    let outcome;
+    if (entry.status === 'success') {
+        outcome = 'Success';
+    } else {
+        // Only our failures count as errors; a caller's mistake doesn't (utils/errorClass.js)
+        const errorClass = classifyStatus(entry.status);
+        if (errorClass === 'caller' || errorClass === 'ok') return;
+        outcome = errorClass === 'warning' ? 'Warning' : 'Error';
+    }
+
+    if (!requestHistory.has(entryHour)) {
+        requestHistory.set(entryHour, {
+            hourMs: entryHour,
+            nCacheRequestsSuccess: 0,
+            nCacheRequestsError: 0,
+            nCacheRequestsWarning: 0,
+            nPoolRequestsSuccess: 0,
+            nPoolRequestsError: 0,
+            nPoolRequestsWarning: 0,
+            nFallbackRequestsSuccess: 0,
+            nFallbackRequestsError: 0,
+            nFallbackRequestsWarning: 0
         });
-    });
+    }
+    requestHistory.get(entryHour)[`n${prefix.charAt(0).toUpperCase() + prefix.slice(1)}Requests${outcome}`]++;
+}
 
-    // Prune old hours from requestHistory to prevent memory leak
+/**
+ * Keep the newest maxRequestHistoryHours hours of request history
+ */
+function pruneRequestHistory(requestHistory, maxRequestHistoryHours) {
     if (requestHistory.size > maxRequestHistoryHours) {
         const sortedKeys = Array.from(requestHistory.keys()).sort((a, b) => a - b);
-        for (let i = 0; i < requestHistory.size - maxRequestHistoryHours; i++) {
+        for (let i = 0; i < sortedKeys.length - maxRequestHistoryHours; i++) {
             requestHistory.delete(sortedKeys[i]);
         }
     }
@@ -271,7 +251,10 @@ function getDashboardMetrics(
         methodDurationHist,
         originDurationHist,
         nodeDurationHist,
-        requestHistory: Array.from(requestHistory.values()).sort((a, b) => a.hourMs - b.hourMs)
+        // Completed hours only: the hour in progress would plot as a dip until it ends
+        requestHistory: Array.from(requestHistory.values())
+            .filter(hour => hour.hourMs < getStartOfHour(Date.now()))
+            .sort((a, b) => a.hourMs - b.hourMs)
     };
 }
 
@@ -446,7 +429,8 @@ function calculateNodeTimeoutMetrics(nodeTimeoutCounts, timeframe = 'week') {
 }
 
 module.exports = {
-    updateRequestHistory,
+    recordRequestHistory,
+    pruneRequestHistory,
     getDashboardMetrics,
     updateRequestorMetrics,
     calculateNodeTimeoutMetrics,

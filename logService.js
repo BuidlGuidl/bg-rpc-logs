@@ -7,7 +7,8 @@ const {
     parsePoolCompareResultsLog
 } = require('./utils/logParsers');
 const {
-    updateRequestHistory,
+    recordRequestHistory,
+    pruneRequestHistory,
     getDashboardMetrics,
     updateRequestorMetrics,
     calculateNodeTimeoutMetrics
@@ -66,8 +67,9 @@ function createLogService(logDir) {
         poolCompareResults: 0
     };
 
-    // Store request history data
+    // Hourly request counts (dashboard's Hourly Request History), counted as lines are read
     const requestHistory = new Map();
+    const countInHistory = prefix => entry => recordRequestHistory(requestHistory, entry, prefix);
 
     let cachedRequestorMetrics = null;
     const lastProcessedRequestorEpoch = { value: 0 };
@@ -214,9 +216,9 @@ function createLogService(logDir) {
     // Read what was appended to every log. Returns which data changed.
     async function parseLogs() {
         const changed = {
-            fallback: await parseLogFile(fallbackLogPath, fallbackRequestsMap, 'fallback', lastProcessedIndexes, lastByteOffsets, maxLogEntries),
-            cache: await parseLogFile(cacheLogPath, cacheRequestsMap, 'cache', lastProcessedIndexes, lastByteOffsets, maxLogEntries),
-            pool: await parseLogFile(poolLogPath, poolRequestsMap, 'pool', lastProcessedIndexes, lastByteOffsets, maxLogEntries),
+            fallback: await parseLogFile(fallbackLogPath, fallbackRequestsMap, 'fallback', lastProcessedIndexes, lastByteOffsets, maxLogEntries, countInHistory('fallback')),
+            cache: await parseLogFile(cacheLogPath, cacheRequestsMap, 'cache', lastProcessedIndexes, lastByteOffsets, maxLogEntries, countInHistory('cache')),
+            pool: await parseLogFile(poolLogPath, poolRequestsMap, 'pool', lastProcessedIndexes, lastByteOffsets, maxLogEntries, countInHistory('pool')),
             poolNodes: await parsePoolNodesLog(poolNodesLogPath, poolNodesMap, poolNodesTimingMap, nodeTimeoutCounts, lastProcessedIndexes, lastByteOffsets, maxLogEntries),
             poolCompareResults: await parsePoolCompareResultsLog(poolCompareResultsLogPath, poolCompareResultsMap, lastProcessedIndexes, lastByteOffsets)
         };
@@ -233,7 +235,7 @@ function createLogService(logDir) {
         // Reset lastProcessedRequestorEpoch to ensure we process all entries on first run
         lastProcessedRequestorEpoch.value = 0;
 
-        updateRequestHistory(requestHistory, fallbackRequestsMap, cacheRequestsMap, poolRequestsMap, maxRequestHistoryHours);
+        pruneRequestHistory(requestHistory, maxRequestHistoryHours);
         updateCachedMetrics();
 
         // Track the last hour we processed to detect hour changes
@@ -248,15 +250,18 @@ function createLogService(logDir) {
         tickRunning = true;
         try {
             const currentHour = new Date(Date.now()).getHours();
+            let hourChanged = false;
             if (currentHour !== lastProcessedHour) {
                 console.log(`Hour changed from ${lastProcessedHour} to ${currentHour}, updating request history and node timeout metrics`);
-                updateRequestHistory(requestHistory, fallbackRequestsMap, cacheRequestsMap, poolRequestsMap, maxRequestHistoryHours);
+                pruneRequestHistory(requestHistory, maxRequestHistoryHours);
                 updateNodeTimeoutMetrics();
                 lastProcessedHour = currentHour;
+                hourChanged = true;
             }
 
             const changed = await parseLogs();
-            if (Object.values(changed).some(Boolean) || Date.now() - dashboardUpdatedAt >= maxDashboardAgeMs) {
+            // The hour that just ended goes on the chart now, not on the next rebuild
+            if (hourChanged || Object.values(changed).some(Boolean) || Date.now() - dashboardUpdatedAt >= maxDashboardAgeMs) {
                 updateCachedMetrics();
             }
             dropStaleResponses();

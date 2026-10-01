@@ -32,9 +32,10 @@ function pruneOldest(targetMap, maxEntries) {
 /**
  * Parse a standard log file incrementally
  * Efficiently reads only new entries from log files
+ * @param {(entry: Object) => void} [onEntry] - called once with each new entry as it is read
  * @returns {Promise<boolean>} - true if targetMap changed
  */
-async function parseLogFile(logPath, targetMap, logType, lastProcessedIndexes, lastByteOffsets, maxLogEntries) {
+async function parseLogFile(logPath, targetMap, logType, lastProcessedIndexes, lastByteOffsets, maxLogEntries, onEntry) {
     try {
         let startLine = lastProcessedIndexes[logType] + 1;
         let startByte = lastByteOffsets[logType];
@@ -75,7 +76,7 @@ async function parseLogFile(logPath, targetMap, logType, lastProcessedIndexes, l
             const entry = parseRequestLogLine(line);
             if (entry) {
                 const key = ownCopy(`${entry.epoch}-${currentLine}`);
-                targetMap.set(key, {
+                const stored = {
                     timestamp: ownCopy(entry.timestamp),
                     epoch: ownCopy(entry.epoch),
                     requester: ownCopy(entry.requester || ''),
@@ -85,7 +86,9 @@ async function parseLogFile(logPath, targetMap, logType, lastProcessedIndexes, l
                     elapsed: entry.elapsed,
                     status: ownCopy(entry.status),
                     lineIndex: currentLine
-                });
+                };
+                targetMap.set(key, stored);
+                if (onEntry) onEntry(stored);
                 newEntriesCount++;
             }
             // Resume point is the last line read, parsed or skipped, so line numbers
