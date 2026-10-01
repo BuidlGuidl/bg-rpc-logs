@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { createLogService } = require('../logService');
+const { parseLogFile } = require('../utils/logParsers');
 const { recordRequestHistory, pruneRequestHistory } = require('../utils/metricsCalculators');
 const { getStartOfHour } = require('../utils/timeUtils');
 
@@ -32,6 +33,30 @@ const err = (code, message) => JSON.stringify({ jsonrpc: '2.0', error: { code, m
   for (let i = 1; i <= 5; i++) recordRequestHistory(h, { epoch: String(H - i * HOUR), status: 'success' }, 'pool');
   pruneRequestHistory(h, 3);
   assert.deepStrictEqual([...h.keys()].sort(), [H - 2 * HOUR, H - HOUR, H], 'newest 3 hours kept');
+
+  // ---- first read: the whole file reaches the history, only the last maxLogEntries are kept
+  {
+    const file = path.join(os.tmpdir(), `reqhistory-window-${process.pid}.log`);
+    const lines = Array.from({ length: 10 }, (_, i) => line(H - (10 - i) * HOUR, 'https://app.example', 'success'));
+    lines.splice(4, 0, 'v2|broken\n'); // an unreadable line: skipped, still counted as a line
+    fs.writeFileSync(file, lines.join(''));
+    const map = new Map(); const idx = { pool: -1 }; const offsets = { pool: 0 }; const seen = [];
+    const log0 = console.log; console.log = () => {};
+    await parseLogFile(file, map, 'pool', idx, offsets, 3, (e) => seen.push(Number(e.epoch)));
+    assert.strictEqual(seen.length, 10, 'every request line read once, the unreadable one skipped');
+    assert.deepStrictEqual([...map.values()].map((e) => e.lineIndex), [8, 9, 10], 'last 3 lines kept, real line numbers');
+    assert.strictEqual(offsets.pool, fs.statSync(file).size);
+    fs.appendFileSync(file, line(H, 'https://app.example', 'success'));
+    await parseLogFile(file, map, 'pool', idx, offsets, 3, (e) => seen.push(Number(e.epoch)));
+    assert.deepStrictEqual(seen.slice(10), [H], 'then only appended lines');
+    assert.deepStrictEqual([...map.values()].map((e) => e.lineIndex), [9, 10, 11]);
+    // without onEntry: the first read starts at the kept lines (as before)
+    const map2 = new Map();
+    await parseLogFile(file, map2, 'pool', { pool: -1 }, { pool: 0 }, 3);
+    assert.deepStrictEqual([...map2.values()].map((e) => e.lineIndex), [9, 10, 11]);
+    console.log = log0;
+    fs.unlinkSync(file);
+  }
 
   // ---- the 2026-10-01 sequence, through the service
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reqhistory-'));

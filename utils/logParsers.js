@@ -32,7 +32,10 @@ function pruneOldest(targetMap, maxEntries) {
 /**
  * Parse a standard log file incrementally
  * Efficiently reads only new entries from log files
- * @param {(entry: Object) => void} [onEntry] - called once with each new entry as it is read
+ * @param {(entry: Object) => void} [onEntry] - called once with every request read. With it, the
+ *   first read covers the whole file: lines before the last maxLogEntries go to onEntry only (the
+ *   hourly history counts the whole file) and aren't kept. Without it, the first read starts at
+ *   the last maxLogEntries lines.
  * @returns {Promise<boolean>} - true if targetMap changed
  */
 async function parseLogFile(logPath, targetMap, logType, lastProcessedIndexes, lastByteOffsets, maxLogEntries, onEntry) {
@@ -40,14 +43,18 @@ async function parseLogFile(logPath, targetMap, logType, lastProcessedIndexes, l
         let startLine = lastProcessedIndexes[logType] + 1;
         let startByte = lastByteOffsets[logType];
         let reset = false;
+        let firstKeptLine = 0; // lines before this one are passed to onEntry but not kept
 
         if (lastProcessedIndexes[logType] === -1) {
-            // First run: only read the last maxLogEntries lines
+            // First run: keep only the last maxLogEntries lines
             const tail = await findTailStart(logPath, maxLogEntries);
-            startLine = tail.startLine;
-            startByte = tail.startByte;
-            if (startLine > 0) {
-                console.log(`${logType}: Skipping first ${startLine} lines, reading last ${maxLogEntries} entries from ${tail.totalLines} total lines`);
+            firstKeptLine = tail.startLine;
+            if (!onEntry) {
+                startLine = tail.startLine;
+                startByte = tail.startByte;
+            }
+            if (firstKeptLine > 0) {
+                console.log(`${logType}: Keeping last ${maxLogEntries} of ${tail.totalLines} lines${onEntry ? ' (all counted in the hourly history)' : ''}`);
             }
         }
 
@@ -74,7 +81,9 @@ async function parseLogFile(logPath, targetMap, logType, lastProcessedIndexes, l
         lastByteOffsets[logType] = await readLines(logPath, startByte, (line) => {
             // v2 or legacy format (utils/requestLogLine.js); unreadable lines are skipped
             const entry = parseRequestLogLine(line);
-            if (entry) {
+            if (entry && currentLine < firstKeptLine) {
+                onEntry(entry);
+            } else if (entry) {
                 const key = ownCopy(`${entry.epoch}-${currentLine}`);
                 const stored = {
                     timestamp: ownCopy(entry.timestamp),
