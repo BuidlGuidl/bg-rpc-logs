@@ -12,6 +12,21 @@ const { classifyStatus } = require('./errorClass');
  * stayed as it was then. 14 fallbacks just after a restart never reached the chart.)
  * @param {string} prefix - 'fallback', 'cache' or 'pool'
  */
+function emptyHistoryHour(hourMs) {
+    return {
+        hourMs,
+        nCacheRequestsSuccess: 0,
+        nCacheRequestsError: 0,
+        nCacheRequestsWarning: 0,
+        nPoolRequestsSuccess: 0,
+        nPoolRequestsError: 0,
+        nPoolRequestsWarning: 0,
+        nFallbackRequestsSuccess: 0,
+        nFallbackRequestsError: 0,
+        nFallbackRequestsWarning: 0
+    };
+}
+
 function recordRequestHistory(requestHistory, entry, prefix) {
     const entryHour = getStartOfHour(entry.epoch);
     if (isNaN(entryHour)) return;
@@ -32,18 +47,7 @@ function recordRequestHistory(requestHistory, entry, prefix) {
     }
 
     if (!requestHistory.has(entryHour)) {
-        requestHistory.set(entryHour, {
-            hourMs: entryHour,
-            nCacheRequestsSuccess: 0,
-            nCacheRequestsError: 0,
-            nCacheRequestsWarning: 0,
-            nPoolRequestsSuccess: 0,
-            nPoolRequestsError: 0,
-            nPoolRequestsWarning: 0,
-            nFallbackRequestsSuccess: 0,
-            nFallbackRequestsError: 0,
-            nFallbackRequestsWarning: 0
-        });
+        requestHistory.set(entryHour, emptyHistoryHour(entryHour));
     }
     requestHistory.get(entryHour)[`n${prefix.charAt(0).toUpperCase() + prefix.slice(1)}Requests${outcome}`]++;
 }
@@ -251,10 +255,12 @@ function getDashboardMetrics(
         methodDurationHist,
         originDurationHist,
         nodeDurationHist,
-        // Completed hours only: the hour in progress would plot as a dip until it ends
+        // Completed hours; the hour in progress separately, so the chart can draw it apart (as of
+        // timestamp) instead of as a dip
         requestHistory: Array.from(requestHistory.values())
             .filter(hour => hour.hourMs < getStartOfHour(Date.now()))
-            .sort((a, b) => a.hourMs - b.hourMs)
+            .sort((a, b) => a.hourMs - b.hourMs),
+        requestHistoryCurrentHour: { ...(requestHistory.get(getStartOfHour(Date.now())) || emptyHistoryHour(getStartOfHour(Date.now()))) }
     };
 }
 

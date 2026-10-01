@@ -82,6 +82,9 @@ const err = (code, message) => JSON.stringify({ jsonrpc: '2.0', error: { code, m
   write('poolRequests.log', line(at(7, 20), 'https://app.example', 'success'));
   now = at(7, 30); await service.tick();
   assert.strictEqual(hourH(), undefined);
+  const live = JSON.parse(service.respond('/dashboard').body).requestHistoryCurrentHour;
+  assert.deepStrictEqual([live.hourMs, live.nPoolRequestsSuccess, live.nCacheRequestsSuccess, live.nFallbackRequestsSuccess], [H, 5, 1, 14],
+    'the hour in progress is served on its own, live');
 
   // the hour ends: the chart gets the whole hour, fallbacks included
   write('poolRequests.log', line(at(60, 1), 'https://app.example', 'success')); // first line of the next hour
@@ -89,6 +92,9 @@ const err = (code, message) => JSON.stringify({ jsonrpc: '2.0', error: { code, m
   assert.deepStrictEqual(
     [hourH().nPoolRequestsSuccess, hourH().nCacheRequestsSuccess, hourH().nFallbackRequestsSuccess], [5, 1, 14],
     'every line of the hour, read before or after the restart (pool: 3 at 0:30, 1 at 59:50, 1 at 7:20)');
+
+  const next = JSON.parse(service.respond('/dashboard').body).requestHistoryCurrentHour;
+  assert.deepStrictEqual([next.hourMs, next.nPoolRequestsSuccess, next.nFallbackRequestsSuccess], [H + HOUR, 1, 0], 'then the new hour');
 
   // counted once: more ticks, an hour later still the same
   now = at(60, 15); await service.tick();
