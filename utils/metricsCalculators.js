@@ -92,9 +92,8 @@ function getDashboardMetrics(
     let totalCacheTime = 0;
     let totalPoolTime = 0;
     
-    // Object to store method-based and origin-based times for ALL requests
+    // Object to store method-based times for ALL requests
     const methodTimes = {};
-    const originTimes = {};
     
     // Arrays to store request times for different types
     const fallbackRequestTimesLastHour = [];
@@ -108,13 +107,6 @@ function getDashboardMetrics(
             methodTimes[entry.method] = [];
         }
         methodTimes[entry.method].push(entry.elapsed);
-
-        // Process origin times
-        const origin = entry.requester || 'N/A';
-        if (!originTimes[origin]) {
-            originTimes[origin] = [];
-        }
-        originTimes[origin].push(entry.elapsed);
     };
     
     // Process fallback requests
@@ -204,15 +196,10 @@ function getDashboardMetrics(
         }
     });
 
-    // Calculate percentiles for each method and origin using ALL data
+    // Calculate percentiles for each method using ALL data
     const methodDurationHist = {};
     Object.entries(methodTimes).forEach(([method, times]) => {
         methodDurationHist[method] = calculatePercentiles(times, [1, 25, 50, 75, 99]);
-    });
-
-    const originDurationHist = {};
-    Object.entries(originTimes).forEach(([origin, times]) => {
-        originDurationHist[origin] = calculatePercentiles(times, [1, 25, 50, 75, 99]);
     });
 
     // Calculate percentiles for each node using ALL timing data
@@ -253,7 +240,6 @@ function getDashboardMetrics(
         medCacheRequestClientTimeLastHour,
         medPoolRequestTimeLastHour,
         methodDurationHist,
-        originDurationHist,
         nodeDurationHist,
         // Completed hours; the hour in progress separately, so the chart can draw it apart (as of
         // timestamp) instead of as a dip
