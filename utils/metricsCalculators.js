@@ -65,6 +65,67 @@ function pruneRequestHistory(requestHistory, maxRequestHistoryHours) {
 }
 
 /**
+ * Hourly pool request time percentiles (the dashboard's pool request time chart): successful pool
+ * requests only, as bg-rpc-proxy measured them. Times are collected per hour as lines are read; an
+ * hour is reduced to its percentiles once a line two hours newer arrives (one hour of slack for lines
+ * written slightly out of order around the boundary), so only the newest hours keep raw times.
+ */
+const POOL_TIME_PERCENTILES = [1, 25, 50, 75, 99];
+const HOUR_MS = 60 * 60 * 1000;
+
+function createPoolTimeHistory() {
+    return { open: new Map(), done: new Map() }; // hourMs → times[] / hourMs → { hourMs, n, p1, ... }
+}
+
+function summarizePoolTimes(hourMs, times) {
+    return { hourMs, n: times.length, ...calculatePercentiles(times.slice(), POOL_TIME_PERCENTILES) };
+}
+
+function recordPoolTime(history, entry) {
+    if (entry.status !== 'success') return;
+    const hourMs = getStartOfHour(entry.epoch);
+    const elapsed = Number(entry.elapsed);
+    if (isNaN(hourMs) || !Number.isFinite(elapsed)) return;
+    if (history.done.has(hourMs)) return; // a line more than an hour late: its hour is already summarized
+
+    if (!history.open.has(hourMs)) history.open.set(hourMs, []);
+    history.open.get(hourMs).push(elapsed);
+    for (const [openHour, times] of history.open) {
+        if (openHour < hourMs - HOUR_MS) {
+            history.done.set(openHour, summarizePoolTimes(openHour, times));
+            history.open.delete(openHour);
+        }
+    }
+}
+
+/**
+ * Keep the newest maxHours hours
+ */
+function prunePoolTimeHistory(history, maxHours) {
+    const hours = [...history.done.keys(), ...history.open.keys()].sort((a, b) => a - b);
+    for (const hourMs of hours.slice(0, Math.max(0, hours.length - maxHours))) {
+        history.done.delete(hourMs);
+        history.open.delete(hourMs);
+    }
+}
+
+/**
+ * Completed hours (sorted) and the hour in progress (null if it has no successful pool request yet)
+ */
+function poolTimeHistoryForDashboard(history, nowMs = Date.now()) {
+    const currentHourMs = getStartOfHour(nowMs);
+    const hours = [...history.done.values()];
+    for (const [hourMs, times] of history.open) {
+        if (hourMs < currentHourMs) hours.push(summarizePoolTimes(hourMs, times));
+    }
+    const current = history.open.get(currentHourMs);
+    return {
+        poolTimeHistory: hours.sort((a, b) => a.hourMs - b.hourMs),
+        poolTimeCurrentHour: current ? summarizePoolTimes(currentHourMs, current) : null
+    };
+}
+
+/**
  * Get comprehensive dashboard metrics
  */
 function getDashboardMetrics(
@@ -72,7 +133,8 @@ function getDashboardMetrics(
     cacheRequestsMap,
     poolRequestsMap,
     poolNodesTimingMap,
-    requestHistory
+    requestHistory,
+    poolTimeHistory = createPoolTimeHistory()
 ) {
     const oneHourAgo = Date.now() - (60 * 60 * 1000); // 1 hour in milliseconds
     
@@ -246,7 +308,9 @@ function getDashboardMetrics(
         requestHistory: Array.from(requestHistory.values())
             .filter(hour => hour.hourMs < getStartOfHour(Date.now()))
             .sort((a, b) => a.hourMs - b.hourMs),
-        requestHistoryCurrentHour: { ...(requestHistory.get(getStartOfHour(Date.now())) || emptyHistoryHour(getStartOfHour(Date.now()))) }
+        requestHistoryCurrentHour: { ...(requestHistory.get(getStartOfHour(Date.now())) || emptyHistoryHour(getStartOfHour(Date.now()))) },
+        // Hourly percentiles of successful pool request time (ms): poolTimeHistory, poolTimeCurrentHour
+        ...poolTimeHistoryForDashboard(poolTimeHistory)
     };
 }
 
@@ -423,6 +487,10 @@ function calculateNodeTimeoutMetrics(nodeTimeoutCounts, timeframe = 'week') {
 module.exports = {
     recordRequestHistory,
     pruneRequestHistory,
+    createPoolTimeHistory,
+    recordPoolTime,
+    prunePoolTimeHistory,
+    poolTimeHistoryForDashboard,
     getDashboardMetrics,
     updateRequestorMetrics,
     calculateNodeTimeoutMetrics,

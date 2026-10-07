@@ -9,6 +9,9 @@ const {
 const {
     recordRequestHistory,
     pruneRequestHistory,
+    createPoolTimeHistory,
+    recordPoolTime,
+    prunePoolTimeHistory,
     getDashboardMetrics,
     updateRequestorMetrics,
     calculateNodeTimeoutMetrics
@@ -70,6 +73,12 @@ function createLogService(logDir) {
     // Hourly request counts (dashboard's Hourly Request History), counted as lines are read
     const requestHistory = new Map();
     const countInHistory = prefix => entry => recordRequestHistory(requestHistory, entry, prefix);
+    // Hourly pool request time percentiles (dashboard), from the same pool lines
+    const poolTimeHistory = createPoolTimeHistory();
+    const countPoolLine = entry => {
+        recordRequestHistory(requestHistory, entry, 'pool');
+        recordPoolTime(poolTimeHistory, entry);
+    };
 
     let cachedRequestorMetrics = null;
     const lastProcessedRequestorEpoch = { value: 0 };
@@ -193,7 +202,8 @@ function createLogService(logDir) {
             cacheRequestsMap,
             poolRequestsMap,
             poolNodesTimingMap,
-            requestHistory
+            requestHistory,
+            poolTimeHistory
         );
         cachedRequestorMetrics = updateRequestorMetrics(
             cachedRequestorMetrics,
@@ -218,7 +228,7 @@ function createLogService(logDir) {
         const changed = {
             fallback: await parseLogFile(fallbackLogPath, fallbackRequestsMap, 'fallback', lastProcessedIndexes, lastByteOffsets, maxLogEntries, countInHistory('fallback')),
             cache: await parseLogFile(cacheLogPath, cacheRequestsMap, 'cache', lastProcessedIndexes, lastByteOffsets, maxLogEntries, countInHistory('cache')),
-            pool: await parseLogFile(poolLogPath, poolRequestsMap, 'pool', lastProcessedIndexes, lastByteOffsets, maxLogEntries, countInHistory('pool')),
+            pool: await parseLogFile(poolLogPath, poolRequestsMap, 'pool', lastProcessedIndexes, lastByteOffsets, maxLogEntries, countPoolLine),
             poolNodes: await parsePoolNodesLog(poolNodesLogPath, poolNodesMap, poolNodesTimingMap, nodeTimeoutCounts, lastProcessedIndexes, lastByteOffsets, maxLogEntries),
             poolCompareResults: await parsePoolCompareResultsLog(poolCompareResultsLogPath, poolCompareResultsMap, lastProcessedIndexes, lastByteOffsets)
         };
@@ -236,6 +246,7 @@ function createLogService(logDir) {
         lastProcessedRequestorEpoch.value = 0;
 
         pruneRequestHistory(requestHistory, maxRequestHistoryHours);
+        prunePoolTimeHistory(poolTimeHistory, maxRequestHistoryHours);
         updateCachedMetrics();
 
         // Track the last hour we processed to detect hour changes
@@ -254,6 +265,7 @@ function createLogService(logDir) {
             if (currentHour !== lastProcessedHour) {
                 console.log(`Hour changed from ${lastProcessedHour} to ${currentHour}, updating request history and node timeout metrics`);
                 pruneRequestHistory(requestHistory, maxRequestHistoryHours);
+                prunePoolTimeHistory(poolTimeHistory, maxRequestHistoryHours);
                 updateNodeTimeoutMetrics();
                 lastProcessedHour = currentHour;
                 hourChanged = true;
