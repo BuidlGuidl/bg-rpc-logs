@@ -3,6 +3,7 @@ const path = require('path');
 const { getMapContents } = require('./utils/dataTransformers');
 const {
     parseLogFile,
+    parseMergedRequestsLog,
     parsePoolNodesLog,
     parsePoolCompareResultsLog
 } = require('./utils/logParsers');
@@ -29,7 +30,8 @@ const STATUS_FILTER_CLASS = { success: 'ok', warning: 'warning', error: 'error' 
 const SEARCH_FIELDS = {
     request: ['requester', 'ip', 'method', 'params', 'status'],
     node: ['nodeId', 'owner', 'method', 'params', 'status'],
-    compare: ['mismatchedNode', 'mismatchedOwner', 'nodeId1', 'nodeId2', 'nodeId3', 'method', 'params']
+    compare: ['mismatchedNode', 'mismatchedOwner', 'nodeId1', 'nodeId2', 'nodeId3', 'method', 'params'],
+    merged: ['requester', 'ip', 'method', 'params', 'status']
 };
 const MAX_METHOD_CHARS = 100;
 const MAX_SEARCH_CHARS = 200;
@@ -44,6 +46,7 @@ function createLogService(logDir) {
     const poolLogPath = path.join(logDir, 'poolRequests.log');
     const poolNodesLogPath = path.join(logDir, 'poolNodes.log');
     const poolCompareResultsLogPath = path.join(logDir, 'poolCompareResults.log');
+    const mergedLogPath = path.join(logDir, 'mergedRequests.log');
 
     // Data storage maps
     const fallbackRequestsMap = new Map();
@@ -53,6 +56,8 @@ function createLogService(logDir) {
     const poolNodesTimingMap = new Map();
     const nodeTimeoutCounts = new Map();
     const poolCompareResultsMap = new Map();
+    // Requests bg-rpc-proxy answered by sharing an identical one in flight (mergedRequests.log)
+    const mergedRequestsMap = new Map();
 
     // Last line read and byte offset after it, per log
     const lastProcessedIndexes = {
@@ -60,14 +65,16 @@ function createLogService(logDir) {
         cache: -1,
         pool: -1,
         poolNodes: -1,
-        poolCompareResults: -1
+        poolCompareResults: -1,
+        merged: -1
     };
     const lastByteOffsets = {
         fallback: 0,
         cache: 0,
         pool: 0,
         poolNodes: 0,
-        poolCompareResults: 0
+        poolCompareResults: 0,
+        merged: 0
     };
 
     // Hourly request counts (dashboard's Hourly Request History), counted as lines are read
@@ -97,6 +104,7 @@ function createLogService(logDir) {
         pool: 0,
         poolNodes: 0,
         poolCompareResults: 0,
+        merged: 0, // also bumped when the cache log changes: merged entries take status and params from it
         dashboard: 0,
         requestor: 0,
         nodeTimeout: 0
@@ -107,6 +115,7 @@ function createLogService(logDir) {
         '/poolRequests': ['pool', () => getMapContents(poolRequestsMap, poolCompareResultsMap)],
         '/poolCompareResults': ['poolCompareResults', () => getMapContents(poolCompareResultsMap, poolCompareResultsMap)],
         '/poolNodes': ['poolNodes', () => getMapContents(poolNodesMap, poolCompareResultsMap)],
+        '/mergedRequests': ['merged', () => mergedEntriesNewestFirst()],
         '/dashboard': ['dashboard', () => cachedDashboardMetrics],
         '/requestorTable': ['requestor', () => cachedRequestorMetrics],
         '/nodeTimeoutPercentLastWeek': ['nodeTimeout', () => cachedNodeTimeoutMetricsLastWeek],
@@ -120,8 +129,33 @@ function createLogService(logDir) {
         '/cacheRequests': cacheRequestsMap,
         '/poolRequests': poolRequestsMap,
         '/poolNodes': poolNodesMap,
-        '/poolCompareResults': poolCompareResultsMap
+        '/poolCompareResults': poolCompareResultsMap,
+        '/mergedRequests': mergedRequestsMap
     };
+
+    // Merged requests, newest first, each with its own cache line's status, params and error class.
+    // bg-rpc-proxy writes both lines with the same epoch, IP, method and wait (the cache line's
+    // elapsed), so that is the match. An entry whose cache line isn't (or is no longer) in
+    // cacheRequestsMap gets status '' and no error class: it shows under All / No Client only.
+    // Rebuilt only when versions.merged changes (it changes with either log).
+    let mergedEntries = { version: -1, list: [] };
+    function mergedEntriesNewestFirst() {
+        if (mergedEntries.version === versions.merged) return mergedEntries.list;
+        const cacheLines = new Map();
+        for (const c of cacheRequestsMap.values()) cacheLines.set(`${c.epoch}|${c.ip}|${c.method}|${c.elapsed}`, c);
+        const list = Array.from(mergedRequestsMap.values()).reverse().map(m => {
+            const c = cacheLines.get(`${m.epoch}|${m.ip}|${m.method}|${m.waitMs}`);
+            return {
+                ...m,
+                gapMs: Number(m.epoch) - Number(m.leaderEpoch),
+                status: c ? c.status : '',
+                params: c ? c.params : '',
+                errorClass: c ? classifyStatus(c.status) : null
+            };
+        });
+        mergedEntries = { version: versions.merged, list };
+        return list;
+    }
 
     function respond(url) {
         const { pathname, searchParams } = new URL(url, 'http://localhost');
@@ -157,11 +191,18 @@ function createLogService(logDir) {
             return { statusCode: 400, body: JSON.stringify({ error: `page must be >= 1, limit 1-${maxPageLimit}, filter one of ${PAGE_FILTERS.join(', ')}, method up to ${MAX_METHOD_CHARS} and q up to ${MAX_SEARCH_CHARS} characters` }) };
         }
 
-        // Request and node tables are in file order; compare results are kept newest first
+        // Request and node tables are in file order; compare results are kept newest first. Merged
+        // entries come with their error class already (from their cache line)
         const isCompare = targetMap === poolCompareResultsMap;
-        const kind = isCompare ? 'compare' : targetMap === poolNodesMap ? 'node' : 'request';
-        const newestFirst = Array.from(targetMap.values());
-        if (!isCompare) newestFirst.reverse();
+        const isMerged = targetMap === mergedRequestsMap;
+        const kind = isCompare ? 'compare' : isMerged ? 'merged' : targetMap === poolNodesMap ? 'node' : 'request';
+        let newestFirst;
+        if (isMerged) {
+            newestFirst = mergedEntriesNewestFirst();
+        } else {
+            newestFirst = Array.from(targetMap.values());
+            if (!isCompare) newestFirst.reverse();
+        }
 
         const tests = [];
         if (filter !== 'all') {
@@ -169,6 +210,8 @@ function createLogService(logDir) {
                 tests.push(entry => (filter === 'success') === Boolean(entry.resultsMatch));
             } else if (filter === 'no-client') {
                 tests.push(entry => entry.requester !== 'buidlguidl-client');
+            } else if (isMerged) {
+                tests.push(entry => entry.errorClass === STATUS_FILTER_CLASS[filter]);
             } else {
                 tests.push(entry => classifyStatus(entry.status) === STATUS_FILTER_CLASS[filter]);
             }
@@ -185,7 +228,7 @@ function createLogService(logDir) {
 
         const methods = [...new Set(newestFirst.map(entry => entry.method).filter(m => typeof m === 'string' && m))].sort();
         const entries = matching.slice((page - 1) * limit, page * limit)
-            .map(entry => (isCompare ? entry : { ...entry, errorClass: classifyStatus(entry.status) }));
+            .map(entry => (isCompare || isMerged ? entry : { ...entry, errorClass: classifyStatus(entry.status) }));
         return { statusCode: 200, body: JSON.stringify({ total: matching.length, page, limit, methods, entries }) };
     }
 
@@ -230,11 +273,14 @@ function createLogService(logDir) {
             cache: await parseLogFile(cacheLogPath, cacheRequestsMap, 'cache', lastProcessedIndexes, lastByteOffsets, maxLogEntries, countInHistory('cache')),
             pool: await parseLogFile(poolLogPath, poolRequestsMap, 'pool', lastProcessedIndexes, lastByteOffsets, maxLogEntries, countPoolLine),
             poolNodes: await parsePoolNodesLog(poolNodesLogPath, poolNodesMap, poolNodesTimingMap, nodeTimeoutCounts, lastProcessedIndexes, lastByteOffsets, maxLogEntries),
-            poolCompareResults: await parsePoolCompareResultsLog(poolCompareResultsLogPath, poolCompareResultsMap, lastProcessedIndexes, lastByteOffsets)
+            poolCompareResults: await parsePoolCompareResultsLog(poolCompareResultsLogPath, poolCompareResultsMap, lastProcessedIndexes, lastByteOffsets),
+            merged: await parseMergedRequestsLog(mergedLogPath, mergedRequestsMap, lastProcessedIndexes, lastByteOffsets, maxLogEntries)
         };
         Object.keys(changed).forEach(source => {
             if (changed[source]) versions[source]++;
         });
+        // Merged entries take status and params from the cache log
+        if (changed.cache && !changed.merged) versions.merged++;
         return changed;
     }
 

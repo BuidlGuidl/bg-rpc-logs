@@ -1,4 +1,4 @@
-const { parseRequestLogLine } = require('./requestLogLine');
+const { parseRequestLogLine, parseMergedLogLine } = require('./requestLogLine');
 const fs = require('fs');
 const { findTailStart, readLines } = require('./fileUtils');
 const { recordNodeTimeoutSample, pruneNodeTimeoutCounts } = require('./metricsCalculators');
@@ -116,6 +116,70 @@ async function parseLogFile(logPath, targetMap, logType, lastProcessedIndexes, l
     } catch (error) {
         const mapName = logType + 'RequestsMap';
         console.error(`Error parsing ${mapName} log file:`, error);
+        return false;
+    }
+}
+
+/**
+ * Parse mergedRequests.log incrementally (request merging in bg-rpc-proxy): the last maxLogEntries
+ * lines into mergedRequestsMap, in file order, keyed like the request logs. A missing file is normal
+ * (nothing merged yet, or a proxy without merging) and isn't an error.
+ * @returns {Promise<boolean>} - true if the map changed
+ */
+async function parseMergedRequestsLog(logPath, mergedRequestsMap, lastProcessedIndexes, lastByteOffsets, maxLogEntries) {
+    const logType = 'merged';
+    try {
+        let stats;
+        try {
+            stats = await fs.promises.stat(logPath);
+        } catch (error) {
+            if (error.code === 'ENOENT') return false;
+            throw error;
+        }
+        let startLine = lastProcessedIndexes[logType] + 1;
+        let startByte = lastByteOffsets[logType];
+        let reset = false;
+        if (lastProcessedIndexes[logType] === -1) {
+            const tail = await findTailStart(logPath, maxLogEntries);
+            startLine = tail.startLine;
+            startByte = tail.startByte;
+        }
+        if (stats.size < startByte) {
+            console.log(`${logType}: Log file was rotated or truncated, re-reading from start`);
+            mergedRequestsMap.clear();
+            lastProcessedIndexes[logType] = -1;
+            reset = true;
+            startLine = 0;
+            startByte = 0;
+        }
+        if (stats.size === startByte) return reset;
+
+        let added = 0;
+        let currentLine = startLine;
+        lastByteOffsets[logType] = await readLines(logPath, startByte, (line) => {
+            const entry = parseMergedLogLine(line);
+            if (entry) {
+                mergedRequestsMap.set(ownCopy(`${entry.epoch}-${currentLine}`), {
+                    timestamp: ownCopy(entry.timestamp),
+                    epoch: ownCopy(entry.epoch),
+                    requester: ownCopy(entry.requester),
+                    ip: ownCopy(entry.ip),
+                    method: ownCopy(entry.method),
+                    waitMs: entry.waitMs,
+                    leaderEpoch: ownCopy(entry.leaderEpoch),
+                    sameCaller: entry.sameCaller,
+                    lineIndex: currentLine
+                });
+                added++;
+            }
+            lastProcessedIndexes[logType] = currentLine;
+            currentLine++;
+        });
+        pruneOldest(mergedRequestsMap, maxLogEntries);
+        if (added > 0) console.log(`Added ${added} new entries to mergedRequestsMap. Total entries: ${mergedRequestsMap.size}`);
+        return reset || added > 0;
+    } catch (error) {
+        console.error('Error parsing mergedRequests log file:', error);
         return false;
     }
 }
@@ -325,6 +389,7 @@ async function parsePoolCompareResultsLog(logPath, targetMap, lastProcessedIndex
 }
 
 module.exports = {
+    parseMergedRequestsLog,
     parseLogFile,
     parsePoolNodesLog,
     parsePoolCompareResultsLog,

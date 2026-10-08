@@ -84,4 +84,32 @@ function parseRequestLogLine(line) {
   };
 }
 
-module.exports = { parseRequestLogLine, unescapeField };
+/**
+ * A mergedRequests.log line (bg-rpc-proxy utils/requestLogFormat.js formatMergedLine; keep the two
+ * in step): a request answered by sharing an identical request already in flight.
+ *
+ *   m1|timestamp|epoch|origin|ip|method|waitMs|leaderEpoch|sameCaller
+ *
+ * Always exactly 9 fields; origin, ip and method escaped as in v2. Anything else returns null.
+ * @returns {{ timestamp, epoch, requester, ip, method, waitMs: number, leaderEpoch: string,
+ *   sameCaller: boolean } | null}
+ */
+function parseMergedLogLine(line) {
+  if (typeof line !== 'string') return null;
+  const parts = line.split('|');
+  if (parts[0] !== 'm1' || parts.length !== 9) return null;
+  const [, timestamp, epoch, origin, ip, method, waitMs, leaderEpoch, sameCaller] = parts;
+  if (!EPOCH.test(epoch) || !EPOCH.test(leaderEpoch) || !/^\d+$/.test(waitMs) || !/^[01]$/.test(sameCaller)) return null;
+  return {
+    timestamp,
+    epoch,
+    requester: unescapeField(origin),
+    ip: unescapeField(ip),
+    method: unescapeField(method),
+    waitMs: Number(waitMs),
+    leaderEpoch,
+    sameCaller: sameCaller === '1',
+  };
+}
+
+module.exports = { parseRequestLogLine, parseMergedLogLine, unescapeField };
