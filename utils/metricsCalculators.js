@@ -70,11 +70,11 @@ function pruneRequestHistory(requestHistory, maxRequestHistoryHours) {
  * hour is reduced to its percentiles once a line two hours newer arrives (one hour of slack for lines
  * written slightly out of order around the boundary), so only the newest hours keep raw times.
  */
-const POOL_TIME_PERCENTILES = [1, 25, 50, 75, 99];
+const POOL_TIME_PERCENTILES = [5, 25, 50, 75, 95]; // p1/p99 were too extreme for the chart
 const HOUR_MS = 60 * 60 * 1000;
 
 function createPoolTimeHistory() {
-    return { open: new Map(), done: new Map() }; // hourMs → times[] / hourMs → { hourMs, n, p1, ... }
+    return { open: new Map(), done: new Map() }; // hourMs → times[] / hourMs → { hourMs, n, p5, ... }
 }
 
 function summarizePoolTimes(hourMs, times) {

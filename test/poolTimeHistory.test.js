@@ -19,7 +19,7 @@ const ok = (hourMs, elapsed, min = 1) => ({ epoch: String(hourMs + min * 60 * 10
   recordPoolTime(h, { epoch: 'garbage', elapsed: 5, status: 'success' });
   recordPoolTime(h, { epoch: String(CUR + 1000), elapsed: 'NaN', status: 'success' });
   const { poolTimeCurrentHour } = poolTimeHistoryForDashboard(h, NOW);
-  assert.deepStrictEqual(poolTimeCurrentHour, { hourMs: CUR, n: 1, p1: 50, p25: 50, p50: 50, p75: 50, p99: 50 });
+  assert.deepStrictEqual(poolTimeCurrentHour, { hourMs: CUR, n: 1, p5: 50, p25: 50, p50: 50, p75: 50, p95: 50 });
 }
 
 // ---- percentiles: 1..100 ms in one hour (nearest-rank, as the other dashboard percentiles)
@@ -29,7 +29,7 @@ const ok = (hourMs, elapsed, min = 1) => ({ epoch: String(hourMs + min * 60 * 10
   for (const ms of shuffled) recordPoolTime(h, ok(CUR - 3 * HOUR, ms));
   recordPoolTime(h, ok(CUR, 10)); // two hours newer: the first hour is summarized
   assert.ok(!h.open.has(CUR - 3 * HOUR) && h.done.has(CUR - 3 * HOUR), 'summarized once a line two hours newer arrives');
-  assert.deepStrictEqual(h.done.get(CUR - 3 * HOUR), { hourMs: CUR - 3 * HOUR, n: 100, p1: 1, p25: 25, p50: 50, p75: 75, p99: 99 });
+  assert.deepStrictEqual(h.done.get(CUR - 3 * HOUR), { hourMs: CUR - 3 * HOUR, n: 100, p5: 5, p25: 25, p50: 50, p75: 75, p95: 95 });
 }
 
 // ---- out of order around the hour boundary: the previous hour stays open; completed hours sorted
@@ -41,7 +41,7 @@ const ok = (hourMs, elapsed, min = 1) => ({ epoch: String(hourMs + min * 60 * 10
   recordPoolTime(h, ok(CUR, 7));                  // now CUR - 2h is summarized (2 hours older)
   recordPoolTime(h, ok(CUR - 2 * HOUR, 999, 59)); // more than an hour late: ignored
   const { poolTimeHistory, poolTimeCurrentHour } = poolTimeHistoryForDashboard(h, NOW);
-  assert.deepStrictEqual(poolTimeHistory.map((x) => [x.hourMs, x.n, x.p99]), [[CUR - 2 * HOUR, 2, 300], [CUR - HOUR, 1, 20]],
+  assert.deepStrictEqual(poolTimeHistory.map((x) => [x.hourMs, x.n, x.p95]), [[CUR - 2 * HOUR, 2, 300], [CUR - HOUR, 1, 20]],
     'completed hours, sorted, including the still-open previous hour');
   assert.strictEqual(poolTimeCurrentHour.n, 1);
   assert.ok(h.open.has(CUR - HOUR), 'the previous hour is computed for the dashboard without being closed');
